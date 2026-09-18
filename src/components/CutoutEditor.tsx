@@ -106,15 +106,17 @@ export default function CutoutEditor() {
       try {
         const canvas = await fileToCanvas(file);
         baseCanvas.current = canvas;
+        setHasImage(true);
+        setPoints([]);
+        maskRef.current = null;
+        // Wait for the canvases to be mounted/laid out before sizing and drawing.
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         for (const el of [displayRef.current, overlayRef.current]) {
           if (!el) continue;
           el.width = canvas.width;
           el.height = canvas.height;
         }
         displayRef.current?.getContext("2d")!.drawImage(canvas, 0, 0);
-        setHasImage(true);
-        setPoints([]);
-        maskRef.current = null;
         paintOverlay(null, []);
         setStatus("Analysing the image…");
         encodedRef.current = await encodeImage(canvas);
