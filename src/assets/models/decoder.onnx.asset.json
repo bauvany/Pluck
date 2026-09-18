@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "asset_id": "1716271f-1a60-4f4f-b387-e818eb42482a",
+  "project_id": "58237914-bf90-47f9-bea4-abfbd8e3b063",
+  "url": "/__l5e/assets-v1/1716271f-1a60-4f4f-b387-e818eb42482a/sam_mask_decoder_single.onnx",
+  "r2_key": "a/v1/58237914-bf90-47f9-bea4-abfbd8e3b063/1716271f-1a60-4f4f-b387-e818eb42482a/sam_mask_decoder_single.onnx",
+  "original_filename": "sam_mask_decoder_single.onnx",
+  "size": 16501323,
+  "content_type": "application/octet-stream",
+  "created_at": "2026-09-18T03:54:37Z"
+}
