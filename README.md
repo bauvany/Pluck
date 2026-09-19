@@ -1,24 +1,27 @@
 # Cutout Studio
 
-generate an image cut out editor using this model from github: https://github.com/facebookresearch/sam3 in the site i can upload whatever image i want and click on whatever part and have that part cut out, hair, face, body parts, accessories etc, and add an export feature to export those parts.
+Generate an image cut-out editor using MobileSAM. Upload any image, click on any part (hair, face, body parts, accessories, etc.) and have that part cut out. Export feature included to export those parts as transparent PNGs.
 
-This project was built with [Lovable](https://lovable.dev).
+## Stack
 
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/58237914-bf90-47f9-bea4-abfbd8e3b063).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+- [Next.js](https://nextjs.org/) (App Router) + React 19
+- [Tailwind CSS v4](https://tailwindcss.com/) + [shadcn/ui](https://ui.shadcn.com/)
+- [onnxruntime-web](https://onnxruntime.ai/) running MobileSAM in the browser
+- [Bun](https://bun.sh/) as the package manager
+- ONNX models hosted on [Supabase Storage](https://supabase.com/)
 
 ## Development
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+```sh
+bun install
+bun run dev
+```
+
+Then open http://localhost:3000.
+
+## Build
 
 ```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
+bun run build
+bun run start
 ```
