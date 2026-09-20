@@ -2,11 +2,11 @@ import type { Metadata } from "next";
 import { CutoutEditorClient } from "@/components/CutoutEditorClient";
 
 export const metadata: Metadata = {
-  title: "Pluck — click-to-cut image editor",
+  title: "Pluck | Click-to-cut image editor",
   description:
     "Upload a photo, click any part — hair, face, hands, accessories — and export it as a transparent PNG. Powered by MobileSAM in your browser.",
   openGraph: {
-    title: "Pluck — click-to-cut image editor",
+    title: "Pluck | Click-to-cut image editor",
     description:
       "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
     type: "website",
