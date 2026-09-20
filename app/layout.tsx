@@ -3,11 +3,11 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "Cutout Studio",
+  title: "Pluck",
   description: "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
-  authors: [{ name: "Cutout Studio" }],
+  authors: [{ name: "Pluck" }],
   openGraph: {
-    title: "Cutout Studio",
+    title: "Pluck",
     description: "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
     type: "website",
   },
@@ -36,7 +36,7 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=DM+Sans:wght@400;500&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=DM+Sans:wght@400;500&family=Outfit:wght@400;500;600;700;800&display=swap"
         />
       </head>
       <body>

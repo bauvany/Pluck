@@ -13,6 +13,7 @@ const CACHE_NAME = "onnx-models-v3";
 export async function fetchCached(
   url: string,
   onProgress?: (loaded: number, total: number) => void,
+  onSource?: (source: "cache" | "network") => void,
 ): Promise<Uint8Array> {
   // Try cache first.
   if (typeof caches !== "undefined") {
@@ -21,6 +22,7 @@ export async function fetchCached(
       const cached = await cache.match(url);
       if (cached) {
         const buffer = new Uint8Array(await cached.arrayBuffer());
+        onSource?.("cache");
         onProgress?.(buffer.byteLength, buffer.byteLength);
         return buffer;
       }
@@ -28,6 +30,7 @@ export async function fetchCached(
       // Cache unavailable (private mode etc.) — fall through to network.
     }
   }
+  onSource?.("network");
 
   // Network fetch with streaming progress.
   const res = await fetch(url);

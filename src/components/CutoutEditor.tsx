@@ -5,15 +5,20 @@ import {
   ArrowUUpRight,
   Download,
   Eraser,
+  Eyedropper,
   MagicWand,
+  Palette,
   Plus,
   Spinner,
   Trash,
   UploadSimple,
 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  canvasToCutout,
+  clipMaskToPolygon,
   encodeImage,
   fileToCanvas,
   loadModel,
@@ -24,6 +29,7 @@ import {
   type Point,
 } from "@/lib/mobilesam";
 import { removeBackground as crispcutRemoveBg, loadCrispcut } from "@/lib/crispcut";
+import { idbGet, idbPut } from "@/lib/idb";
 
 type Part = Cutout & { id: string; name: string };
 
@@ -32,8 +38,56 @@ type Snapshot = {
   canvasData: ImageData | null;
 };
 
+/** Paints a filled circle into a binary mask (manual brush stamp). */
+function stampBrush(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  cx: number,
+  cy: number,
+  radius: number,
+  value: 0 | 1,
+) {
+  const r2 = radius * radius;
+  const x0 = Math.max(0, Math.floor(cx - radius));
+  const x1 = Math.min(w - 1, Math.ceil(cx + radius));
+  const y0 = Math.max(0, Math.floor(cy - radius));
+  const y1 = Math.min(h - 1, Math.ceil(cy + radius));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy <= r2) mask[y * w + x] = value;
+    }
+  }
+}
+
+/** Samples up to `maxPoints` evenly-spread points from a painted stroke mask. */
+function sampleStrokePoints(
+  stroke: Uint8Array,
+  w: number,
+  h: number,
+  label: 0 | 1,
+  maxPoints = 24,
+): Point[] {
+  const pts: { x: number; y: number }[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (stroke[y * w + x]) pts.push({ x, y });
+    }
+  }
+  if (pts.length === 0) return [];
+  const stride = Math.max(1, Math.floor(pts.length / maxPoints));
+  const out: Point[] = [];
+  for (let i = 0; i < pts.length; i += stride) {
+    out.push({ x: pts[i]!.x + 0.5, y: pts[i]!.y + 0.5, label });
+  }
+  return out;
+}
+
 export default function CutoutEditor() {
   const baseCanvas = useRef<HTMLCanvasElement | null>(null);
+  const originalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const displayRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const encodedRef = useRef<EncodedImage | null>(null);
@@ -48,8 +102,54 @@ export default function CutoutEditor() {
   const [imageReady, setImageReady] = useState(false);
   const [points, setPoints] = useState<Point[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Hydrate saved session (parts + points) from IndexedDB before persisting.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [savedParts, savedPoints] = await Promise.all([
+          idbGet<Part[]>("parts"),
+          idbGet<Point[]>("points"),
+        ]);
+        if (savedParts) setParts(savedParts);
+        if (savedPoints) setPoints(savedPoints);
+      } catch {
+        // Start fresh.
+      }
+      setHydrated(true);
+    })();
+  }, []);
+
+  // Persist parts across reloads (only after hydration to avoid wiping saved data).
+  useEffect(() => {
+    if (!hydrated) return;
+    void idbPut("parts", parts);
+  }, [parts, hydrated]);
+
+  // Persist selection points across reloads.
+  useEffect(() => {
+    if (!hydrated) return;
+    void idbPut("points", points);
+  }, [points, hydrated]);
+
+  // Persist the base image (captures bg removal / cut state) to IndexedDB.
+  const persistImage = useCallback(() => {
+    const base = baseCanvas.current;
+    if (!base) return;
+    base.toBlob((blob) => {
+      if (blob) void idbPut("image", blob);
+    }, "image/png");
+  }, []);
   const [mode, setMode] = useState<"mask" | "exclude" | "cut">("mask");
-  const drawPathRef = useRef<{ x: number; y: number }[]>([]);
+  const [paintMode, setPaintMode] = useState<"auto" | "manual">("auto");
+  const [brushSize, setBrushSize] = useState(8);
+  const [tool, setTool] = useState<"none" | "chroma" | "picker">("none");
+  const [pickedColor, setPickedColor] = useState<string | null>(null);
+  const toolActive = tool !== "none";
+  const manualPaintingRef = useRef(false);
+  const lastStampRef = useRef<{ x: number; y: number } | null>(null);
+  const strokeMaskRef = useRef<Uint8Array | null>(null);
   const drawStartRef = useRef<{ x: number; y: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isDrawingRef = useRef(false);
@@ -57,7 +157,20 @@ export default function CutoutEditor() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([loadModel(), loadCrispcut()])
+    let sources: ("cache" | "network")[] = [];
+    const track = (s: "cache" | "network") => {
+      sources.push(s);
+      if (!cancelled) {
+        setStatus(
+          sources.includes("network")
+            ? "Downloading models (cached for next time)…"
+            : "Loading cached models…",
+        );
+      }
+    };
+    // MobileSAM loads eagerly (needed for clicks). The background-removal
+    // model is lazy-loaded on first "Remove background" press.
+    loadModel(undefined, track)
       .then(() => {
         if (cancelled) return;
         setReady(true);
@@ -79,12 +192,20 @@ export default function CutoutEditor() {
 
     if (mask) {
       const img = new ImageData(overlay.width, overlay.height);
+      // Theme color from the single CSS variable (fallback: #FFCCBB).
+      const raw =
+        getComputedStyle(document.documentElement).getPropertyValue("--theme-primary").trim() ||
+        "#FFCCBB";
+      const hex = raw.replace("#", "");
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
       for (let i = 0; i < mask.length; i++) {
         if (!mask[i]) continue;
         const j = i * 4;
-        img.data[j] = 90;
-        img.data[j + 1] = 240;
-        img.data[j + 2] = 200;
+        img.data[j] = r;
+        img.data[j + 1] = g;
+        img.data[j + 2] = b;
         img.data[j + 3] = 110;
       }
       ctx.putImageData(img, 0, 0);
@@ -120,7 +241,7 @@ export default function CutoutEditor() {
   );
 
   const runSegment = useCallback(
-    async (pts: Point[]) => {
+    async (pts: Point[], clipPolygon?: { x: number; y: number }[]) => {
       const encoded = encodedRef.current;
       if (!encoded || pts.length === 0) {
         maskRef.current = null;
@@ -130,7 +251,10 @@ export default function CutoutEditor() {
       setBusy(true);
       setStatus("Finding that part…");
       try {
-        const mask = await segment(encoded, pts);
+        let mask = await segment(encoded, pts);
+        if (clipPolygon && clipPolygon.length >= 3) {
+          mask = clipMaskToPolygon(mask, baseCanvas.current!.width, baseCanvas.current!.height, clipPolygon);
+        }
         maskRef.current = mask;
         paintOverlay(mask, pts);
         setStatus("Looks right? Add it as a part, or click again to refine.");
@@ -142,6 +266,64 @@ export default function CutoutEditor() {
     },
     [paintOverlay],
   );
+
+  // Restore the last session's image + selection once models are ready.
+  useEffect(() => {
+    if (!ready || !hydrated) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const blob = await idbGet<Blob>("image");
+        if (!blob || cancelled) return;
+        const bitmap = await createImageBitmap(blob);
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        if (cancelled) return;
+        // Load the pristine copy for Reset.
+        const origBlob = await idbGet<Blob>("original");
+        if (origBlob && !cancelled) {
+          const ob = await createImageBitmap(origBlob);
+          const oc = document.createElement("canvas");
+          oc.width = ob.width;
+          oc.height = ob.height;
+          oc.getContext("2d")!.drawImage(ob, 0, 0);
+          ob.close();
+          originalCanvasRef.current = oc;
+        }
+        baseCanvas.current = canvas;
+        setHasImage(true);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        for (const el of [displayRef.current, overlayRef.current]) {
+          if (!el) continue;
+          el.width = canvas.width;
+          el.height = canvas.height;
+        }
+        displayRef.current?.getContext("2d")!.drawImage(canvas, 0, 0);
+        setStatus("Analysing your last image…");
+        encodedRef.current = await encodeImage(canvas);
+        setImageReady(true);
+        historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
+        historyIndexRef.current = 0;
+        updateHistoryFlags();
+        // Restore saved points (from hydrated state) and re-run segmentation.
+        if (points.length > 0) {
+          void runSegment(points);
+        } else {
+          paintOverlay(null, []);
+        }
+        setStatus("Restored your last session. Click a part to continue.");
+      } catch {
+        // Restore failed — start fresh.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, hydrated]);
 
   // Cut mode: click → SAM segments → saves as part → removes area from canvas.
   const runCut = useCallback(
@@ -172,13 +354,14 @@ export default function CutoutEditor() {
         paintOverlay(null, []);
         pushHistory({ points: [], canvasData: snapshotCanvas() });
         setStatus("Cut out and saved. Click another part.");
+        persistImage();
       } catch (err) {
         setStatus(`Cut failed: ${(err as Error).message}`);
       } finally {
         setBusy(false);
       }
     },
-    [paintOverlay, pushHistory, snapshotCanvas],
+    [paintOverlay, pushHistory, snapshotCanvas, persistImage],
   );
 
   const restoreSnapshot = useCallback(
@@ -232,122 +415,156 @@ export default function CutoutEditor() {
     setStatus("Redid.");
   }, [restoreSnapshot, updateHistoryFlags]);
 
-  // Draw/lasso mode — freehand path that samples interior points for SAM.
-  const isPointInPolygon = useCallback(
-    (x: number, y: number, poly: { x: number; y: number }[]) => {
-      let inside = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const xi = poly[i]!.x;
-        const yi = poly[i]!.y;
-        const xj = poly[j]!.x;
-        const yj = poly[j]!.y;
-        if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
-          inside = !inside;
+  // Manual mode: stamps the brush into the mask (or erases the canvas in cut mode).
+  const applyManualStamp = useCallback(
+    (x: number, y: number) => {
+      const base = baseCanvas.current;
+      if (!base) return;
+      const r = brushSize / 2;
+      if (mode === "cut") {
+        // Live erase under the brush.
+        const ctx = base.getContext("2d")!;
+        ctx.save();
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        const display = displayRef.current;
+        if (display) {
+          const dctx = display.getContext("2d")!;
+          dctx.clearRect(0, 0, display.width, display.height);
+          dctx.drawImage(base, 0, 0);
         }
+      } else {
+        const mask = maskRef.current;
+        if (!mask) return;
+        stampBrush(mask, base.width, base.height, x, y, r, mode === "exclude" ? 0 : 1);
+        paintOverlay(mask, []);
       }
-      return inside;
     },
-    [],
-  );
-
-  const drawLassoPath = useCallback(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    paintOverlay(maskRef.current, points);
-    const path = drawPathRef.current;
-    if (path.length < 2) return;
-    const ctx = overlay.getContext("2d")!;
-    ctx.beginPath();
-    ctx.moveTo(path[0]!.x, path[0]!.y);
-    for (let i = 1; i < path.length; i++) ctx.lineTo(path[i]!.x, path[i]!.y);
-    ctx.strokeStyle = "#3ce6b4";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }, [paintOverlay, points]);
-
-  const sampleInteriorPoints = useCallback(
-    (path: { x: number; y: number }[], count: number): Point[] => {
-      let minX = Infinity,
-        minY = Infinity,
-        maxX = -Infinity,
-        maxY = -Infinity;
-      for (const p of path) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-      const pts: Point[] = [];
-      const label: 0 | 1 = mode === "exclude" ? 0 : 1;
-      // Always include the centroid if inside.
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
-      if (isPointInPolygon(cx, cy, path)) pts.push({ x: cx, y: cy, label });
-      // Grid-sample interior points.
-      const w = maxX - minX;
-      const h = maxY - minY;
-      const step = Math.max(2, Math.floor(Math.min(w, h) / 4));
-      for (let y = minY + step / 2; y < maxY && pts.length < count; y += step) {
-        for (let x = minX + step / 2; x < maxX && pts.length < count; x += step) {
-          if (isPointInPolygon(x, y, path)) pts.push({ x, y, label });
-        }
-      }
-      return pts;
-    },
-    [isPointInPolygon, mode],
+    [brushSize, mode, paintOverlay],
   );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (toolActive) return;
       if (!hasImage || !ready || !imageReady || busy || removingBg) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * e.currentTarget.width;
       const y = ((e.clientY - rect.top) / rect.height) * e.currentTarget.height;
+      if (paintMode === "manual") {
+        // Manual brush: clicks paint dots, drags paint lines.
+        if (mode === "exclude" && !maskRef.current) {
+          setStatus("Nothing to exclude yet — paint a mask with the Mask tab first.");
+          return;
+        }
+        const base = baseCanvas.current;
+        if (mode !== "cut" && !maskRef.current && base) {
+          maskRef.current = new Uint8Array(base.width * base.height);
+        }
+        dragOccurredRef.current = false;
+        manualPaintingRef.current = true;
+        lastStampRef.current = { x, y };
+        applyManualStamp(x, y);
+        return;
+      }
       drawStartRef.current = { x, y };
-      drawPathRef.current = [{ x, y }];
       isDrawingRef.current = false;
       dragOccurredRef.current = false;
     },
-    [hasImage, ready, imageReady, busy, removingBg],
+    [toolActive, paintMode, mode, applyManualStamp, hasImage, ready, imageReady, busy, removingBg],
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
-      const start = drawStartRef.current;
-      if (!start) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * e.currentTarget.width;
       const y = ((e.clientY - rect.top) / rect.height) * e.currentTarget.height;
+      if (manualPaintingRef.current) {
+        // Interpolate stamps so fast drags don't leave gaps.
+        const last = lastStampRef.current;
+        if (!last) return;
+        const dist = Math.hypot(x - last.x, y - last.y);
+        const steps = Math.max(1, Math.ceil(dist / Math.max(1, brushSize / 4)));
+        for (let s = 1; s <= steps; s++) {
+          applyManualStamp(last.x + ((x - last.x) * s) / steps, last.y + ((y - last.y) * s) / steps);
+        }
+        lastStampRef.current = { x, y };
+        return;
+      }
+      const start = drawStartRef.current;
+      if (!start) return;
       const dx = x - start.x;
       const dy = y - start.y;
       if (!isDrawingRef.current && dx * dx + dy * dy > 25) {
-        // Moved more than ~5px — this is a drag, start drawing.
+        // Moved more than ~5px — this is a drag, start painting the stroke.
         isDrawingRef.current = true;
         dragOccurredRef.current = true;
+        const base = baseCanvas.current;
+        if (base && !strokeMaskRef.current) {
+          strokeMaskRef.current = new Uint8Array(base.width * base.height);
+        }
+        lastStampRef.current = { x: start.x, y: start.y };
       }
       if (isDrawingRef.current) {
-        drawPathRef.current.push({ x, y });
-        drawLassoPath();
+        // Paint the stroke with the brush thickness into the mask.
+        const base = baseCanvas.current;
+        const stroke = strokeMaskRef.current;
+        if (!base || !stroke) return;
+        const last = lastStampRef.current ?? start;
+        const r = brushSize / 2;
+        const dist = Math.hypot(x - last.x, y - last.y);
+        const steps = Math.max(1, Math.ceil(dist / Math.max(1, brushSize / 4)));
+        for (let s = 1; s <= steps; s++) {
+          const sx = last.x + ((x - last.x) * s) / steps;
+          const sy = last.y + ((y - last.y) * s) / steps;
+          stampBrush(stroke, base.width, base.height, sx, sy, r, 1);
+          if (mode !== "cut" && maskRef.current) {
+            stampBrush(maskRef.current, base.width, base.height, sx, sy, r, mode === "exclude" ? 0 : 1);
+          }
+        }
+        lastStampRef.current = { x, y };
+        paintOverlay(mode === "cut" ? stroke : maskRef.current, []);
       }
     },
-    [drawLassoPath],
+    [brushSize, mode, paintOverlay, applyManualStamp],
   );
 
   const handlePointerUp = useCallback(() => {
+    if (manualPaintingRef.current) {
+      manualPaintingRef.current = false;
+      lastStampRef.current = null;
+      if (mode === "cut") {
+        pushHistory({ points, canvasData: snapshotCanvas() });
+        persistImage();
+        setStatus("Cut out. Keep scrubbing or switch tabs.");
+      } else {
+        setStatus(
+          mode === "mask"
+            ? "Painted. Keep painting or add it as a part."
+            : "Excluded. Keep painting or add it as a part.",
+        );
+      }
+      return;
+    }
     if (!isDrawingRef.current) {
       drawStartRef.current = null;
       return;
     }
     isDrawingRef.current = false;
     drawStartRef.current = null;
-    const path = drawPathRef.current;
-    drawPathRef.current = [];
-    if (path.length < 3) return;
-    const sampled = sampleInteriorPoints(path, 8);
+    // Sample prompt points from the painted stroke — the stroke area tells
+    // SAM what to segment.
+    const stroke = strokeMaskRef.current;
+    strokeMaskRef.current = null;
+    lastStampRef.current = null;
+    const base = baseCanvas.current;
+    if (!stroke || !base) return;
+    const label: 0 | 1 = mode === "exclude" ? 0 : 1;
+    const sampled = sampleStrokePoints(stroke, base.width, base.height, label);
     if (sampled.length === 0) {
-      setStatus("Drawn area was too small — try a larger selection.");
+      setStatus("That stroke was too small — try a bigger brush or a longer stroke.");
       return;
     }
     const next = [...points, ...sampled];
@@ -358,7 +575,7 @@ export default function CutoutEditor() {
       pushHistory({ points: next, canvasData: snapshotCanvas() });
       void runSegment(next);
     }
-  }, [points, mode, sampleInteriorPoints, pushHistory, snapshotCanvas, runSegment, runCut]);
+  }, [points, mode, pushHistory, snapshotCanvas, persistImage, runSegment, runCut]);
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -368,6 +585,15 @@ export default function CutoutEditor() {
       try {
         const canvas = await fileToCanvas(file);
         baseCanvas.current = canvas;
+        // Keep a pristine copy for Reset.
+        const orig = document.createElement("canvas");
+        orig.width = canvas.width;
+        orig.height = canvas.height;
+        orig.getContext("2d")!.drawImage(canvas, 0, 0);
+        originalCanvasRef.current = orig;
+        orig.toBlob((blob) => {
+          if (blob) void idbPut("original", blob);
+        }, "image/png");
         setHasImage(true);
         setPoints([]);
         maskRef.current = null;
@@ -384,6 +610,7 @@ export default function CutoutEditor() {
         encodedRef.current = await encodeImage(canvas);
         setStatus("Click any part: hair, face, a hand, an accessory…");
         setImageReady(true);
+        persistImage();
         // Push initial state so undo/redo has a baseline.
         historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
         historyIndexRef.current = 0;
@@ -397,10 +624,59 @@ export default function CutoutEditor() {
         setBusy(false);
       }
     },
-    [paintOverlay, snapshotCanvas, updateHistoryFlags],
+    [paintOverlay, snapshotCanvas, updateHistoryFlags, persistImage],
   );
 
+  const rgbToHex = (r: number, g: number, b: number) =>
+    "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+
+  // Chroma key: removes every pixel matching the clicked color (small tolerance
+  // so compression noise doesn't leave speckles).
+  const applyChromaKey = (cx: number, cy: number) => {
+    const base = baseCanvas.current;
+    if (!base) return;
+    const ctx = base.getContext("2d")!;
+    const imageData = ctx.getImageData(0, 0, base.width, base.height);
+    const data = imageData.data;
+    const sx = Math.round(cx);
+    const sy = Math.round(cy);
+    const si = (sy * base.width + sx) * 4;
+    const r = data[si]!;
+    const g = data[si + 1]!;
+    const b = data[si + 2]!;
+    const tol = 16;
+    for (let i = 0; i < data.length; i += 4) {
+      if (
+        Math.abs(data[i]! - r) <= tol &&
+        Math.abs(data[i + 1]! - g) <= tol &&
+        Math.abs(data[i + 2]! - b) <= tol
+      ) {
+        data[i + 3] = 0;
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    const display = displayRef.current;
+    if (display) {
+      const dctx = display.getContext("2d")!;
+      dctx.clearRect(0, 0, display.width, display.height);
+      dctx.drawImage(base, 0, 0);
+    }
+    pushHistory({ points, canvasData: snapshotCanvas() });
+    persistImage();
+    setStatus(`Cut out color ${rgbToHex(r, g, b).toUpperCase()}.`);
+  };
+
+  const pickColor = (x: number, y: number) => {
+    const base = baseCanvas.current;
+    if (!base) return;
+    const d = base
+      .getContext("2d")!
+      .getImageData(Math.round(x), Math.round(y), 1, 1).data;
+    setPickedColor(rgbToHex(d[0]!, d[1]!, d[2]!).toUpperCase());
+  };
+
   const handleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (paintMode === "manual") return; // pointer handlers already painted
     if (dragOccurredRef.current) {
       // Was a drag (lasso), not a click — suppress.
       dragOccurredRef.current = false;
@@ -411,6 +687,14 @@ export default function CutoutEditor() {
     const rect = el.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * el.width;
     const y = ((event.clientY - rect.top) / rect.height) * el.height;
+    if (tool === "picker") {
+      pickColor(x, y);
+      return;
+    }
+    if (tool === "chroma") {
+      applyChromaKey(x, y);
+      return;
+    }
     if (mode === "cut") {
       const label: 0 | 1 = 1;
       const next = [...points, { x, y, label }];
@@ -418,8 +702,22 @@ export default function CutoutEditor() {
       void runCut(next);
       return;
     }
-    const label: 0 | 1 = mode === "exclude" ? 0 : 1;
-    const next = [...points, { x, y, label }];
+    if (mode === "exclude") {
+      // Exclude only applies over already-masked areas — ignore clicks elsewhere.
+      const mask = maskRef.current;
+      const px = Math.round(x);
+      const py = Math.round(y);
+      if (!mask || !mask[Math.round(y) * baseCanvas.current!.width + Math.round(x)]) {
+        setStatus("Nothing is highlighted there — switch to Mask to select a part first.");
+        return;
+      }
+      const next = [...points, { x, y, label: 0 as const }];
+      setPoints(next);
+      pushHistory({ points: next, canvasData: snapshotCanvas() });
+      void runSegment(next);
+      return;
+    }
+    const next = [...points, { x, y, label: 1 as const }];
     setPoints(next);
     pushHistory({ points: next, canvasData: snapshotCanvas() });
     void runSegment(next);
@@ -427,9 +725,17 @@ export default function CutoutEditor() {
 
   const addPart = () => {
     const base = baseCanvas.current;
-    const mask = maskRef.current;
-    if (!base || !mask) return;
-    const cutout = maskToCutout(base, mask);
+    if (!base) {
+      setStatus("Upload an image first.");
+      return;
+    }
+    // With a selection, cut out the masked part. Without one, capture the
+    // whole image (e.g. after a background removal) so it can be exported.
+    const cutout = maskRef.current ? maskToCutout(base, maskRef.current) : canvasToCutout(base);
+    if (!cutout) {
+      setStatus("That selection was too small — try clicking closer to the middle of the part.");
+      return;
+    }
     if (!cutout) {
       setStatus("That selection was too small — try clicking closer to the middle of the part.");
       return;
@@ -442,27 +748,46 @@ export default function CutoutEditor() {
     setStatus("Saved. Click another part to keep going.");
   };
 
-  const clearPoints = () => {
+  // Reset — restores the pristine uploaded image and clears all edits
+  // (points, mask, bg removal, cuts, chroma key). Parts are kept.
+  const resetEdits = () => {
+    const original = originalCanvasRef.current;
+    const base = baseCanvas.current;
+    if (!original || !base) return;
+    const ctx = base.getContext("2d")!;
+    ctx.clearRect(0, 0, base.width, base.height);
+    ctx.drawImage(original, 0, 0);
+    const display = displayRef.current;
+    if (display) {
+      const dctx = display.getContext("2d")!;
+      dctx.clearRect(0, 0, display.width, display.height);
+      dctx.drawImage(original, 0, 0);
+    }
     setPoints([]);
     maskRef.current = null;
     paintOverlay(null, []);
-    pushHistory({ points: [], canvasData: snapshotCanvas() });
-    setStatus("Selection cleared.");
+    historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
+    historyIndexRef.current = 0;
+    updateHistoryFlags();
+    persistImage();
+    setStatus("Edits reset — original image restored.");
   };
 
   const removeBackground = useCallback(async () => {
     const base = baseCanvas.current;
     if (!base || !ready) return;
     setRemovingBg(true);
-    setStatus("Removing background…");
+    setStatus("Preparing background remover (first run downloads ~176MB)…");
     try {
       const mask = await crispcutRemoveBg(base);
+      setStatus("Removing background…");
       const ctx = base.getContext("2d")!;
       const imageData = ctx.getImageData(0, 0, base.width, base.height);
       const data = imageData.data;
-      // CrispCut returns a soft alpha mask (0-255) for better edge quality.
+      // RMBG-1.4 returns a soft foreground alpha (0-255) — multiply existing
+      // alpha so earlier edits (cuts, chroma key) stay transparent.
       for (let i = 0; i < mask.length; i++) {
-        data[i * 4 + 3] = mask[i]!; // apply soft alpha
+        data[i * 4 + 3] = Math.round((data[i * 4 + 3]! * mask[i]!) / 255);
       }
       ctx.putImageData(imageData, 0, 0);
       const display = displayRef.current;
@@ -476,12 +801,13 @@ export default function CutoutEditor() {
       paintOverlay(null, []);
       pushHistory({ points: [], canvasData: snapshotCanvas() });
       setStatus("Background removed. Click a part to cut it out, or change image.");
+      persistImage();
     } catch (err) {
       setStatus(`Couldn't remove background: ${(err as Error).message}`);
     } finally {
       setRemovingBg(false);
     }
-  }, [paintOverlay, ready, pushHistory, snapshotCanvas]);
+  }, [paintOverlay, ready, pushHistory, snapshotCanvas, persistImage]);
 
   const download = (part: Part) => {
     const a = document.createElement("a");
@@ -517,7 +843,7 @@ export default function CutoutEditor() {
       >
       <header className="mb-8 flex flex-col gap-3">
         <span className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium tracking-wide text-accent">
-          Artura
+          Pluck - v0.1.0
         </span>
         <h1 className="font-display text-3xl leading-tight text-foreground sm:text-5xl">
           Click anything. Cut it out.
@@ -605,17 +931,9 @@ export default function CutoutEditor() {
             }`}
           >
             <div className="flex w-max items-center gap-2">
-              <Button variant="hero" size="sm" onClick={addPart} disabled={!maskRef.current || busy || removingBg || !imageReady} className="rounded-full shadow-xl">
+              <div className="flex items-center gap-2">
+              <Button variant="hero" size="sm" onClick={addPart} className="rounded-full shadow-xl">
                 <Plus className="size-4" /> Add as part
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={removeBackground}
-                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
-                className="rounded-full border-0 shadow-xl"
-              >
-                <Eraser className="size-4" /> Remove background
               </Button>
               <div className="flex items-center gap-1">
                 <Button
@@ -623,7 +941,7 @@ export default function CutoutEditor() {
                   size="icon"
                   onClick={undo}
                   disabled={!canUndo || busy || removingBg || !imageReady}
-                  className={`h-8 w-8 rounded-full border-0 shadow-xl ${canUndo ? "" : "opacity-30"}`}
+                  className={`h-8 w-8 rounded-full shadow-xl ${canUndo ? "" : "opacity-30"}`}
                   title="Undo"
                 >
                   <ArrowUUpLeft className="size-4" />
@@ -633,7 +951,7 @@ export default function CutoutEditor() {
                   size="icon"
                   onClick={redo}
                   disabled={!canRedo || busy || removingBg || !imageReady}
-                  className={`h-8 w-8 rounded-full border-0 shadow-xl ${canRedo ? "" : "opacity-30"}`}
+                  className={`h-8 w-8 rounded-full shadow-xl ${canRedo ? "" : "opacity-30"}`}
                   title="Redo"
                 >
                   <ArrowUUpRight className="size-4" />
@@ -642,11 +960,21 @@ export default function CutoutEditor() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={clearPoints}
-                disabled={!points.length || removingBg || !imageReady}
-                className="rounded-full border-0 shadow-xl"
+                onClick={removeBackground}
+                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                className="rounded-full shadow-xl"
               >
-                <ArrowClockwise className="size-4" /> Clear points
+                <Eraser className="size-4" /> Remove background
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={resetEdits}
+                disabled={!hasImage || busy || removingBg || !imageReady}
+                className="rounded-full shadow-xl"
+                title="Restore the original image and clear all edits"
+              >
+                <ArrowClockwise className="size-4" /> Reset
               </Button>
               <Tabs
                 value={mode}
@@ -656,7 +984,7 @@ export default function CutoutEditor() {
                 <TabsList className="h-8 rounded-full">
                   <TabsTrigger
                     value="mask"
-                    className="rounded-full text-xs data-[state=active]:bg-[#3ce6b4] data-[state=active]:text-black"
+                    className="rounded-full text-xs data-[state=active]:bg-[var(--theme-primary)] data-[state=active]:text-black"
                   >
                     Mask
                   </TabsTrigger>
@@ -674,17 +1002,80 @@ export default function CutoutEditor() {
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
+              <Tabs
+                value={paintMode}
+                onValueChange={(v) => setPaintMode(v as "auto" | "manual")}
+                className="flex items-center"
+              >
+                <TabsList className="h-8 rounded-full">
+                  <TabsTrigger
+                    value="auto"
+                    className="rounded-full text-xs data-[state=active]:bg-[#22d3ee] data-[state=active]:text-black"
+                  >
+                    Auto
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="manual"
+                    className="rounded-full text-xs data-[state=active]:bg-[#fb923c] data-[state=active]:text-black"
+                  >
+                    Manual
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
               {hasImage && (
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => fileInputRef.current?.click()}
-                  className="rounded-full border-0 shadow-xl"
+                  className="rounded-full shadow-xl"
                 >
                   <UploadSimple className="size-4" /> Change image
                 </Button>
               )}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTool((t) => (t === "chroma" ? "none" : "chroma"))}
+                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                className={`rounded-full shadow-xl ${tool === "chroma" ? "bg-accent! text-black!" : ""}`}
+                title="Chroma key — click a color to cut it out"
+              >
+                <Eyedropper className="size-4" /> Chroma key
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTool((t) => (t === "picker" ? "none" : "picker"))}
+                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                className={`rounded-full shadow-xl ${tool === "picker" ? "bg-accent! text-black!" : ""}`}
+              >
+                <Palette className="size-4" /> Color picker
+              </Button>
+              {pickedColor && (
+                <div className="flex h-8 items-center gap-2 rounded-full border-2 border-border bg-card px-3 shadow-xl">
+                  <span
+                    className="size-4 rounded-full border border-border"
+                    style={{ backgroundColor: pickedColor }}
+                  />
+                  <span className="font-mono text-xs text-foreground">{pickedColor}</span>
+                </div>
+              )}
             </div>
+          </div>
+          <div className="mx-auto mt-2 flex w-full max-w-2xl items-center gap-3 rounded-full border-2 border-border bg-card px-4 py-1.5 shadow-xl">
+            <span className="text-xs font-medium text-muted-foreground">Brush Size</span>
+            <Slider
+              value={[brushSize]}
+              onValueChange={(v) => setBrushSize(v[0] ?? 1)}
+              min={1}
+              max={50}
+              step={1}
+              className="flex-1"
+            />
+            <span className="w-10 text-right font-mono text-xs text-foreground">
+              {brushSize}px
+            </span>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
             {status} <span className="text-accent">Click</span> to select,{" "}

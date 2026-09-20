@@ -33,7 +33,10 @@ export type EncodedImage = {
 let sessions: Promise<{ encoder: ort.InferenceSession; decoder: ort.InferenceSession }> | null =
   null;
 
-export function loadModel(onProgress?: (fraction: number) => void) {
+export function loadModel(
+  onProgress?: (fraction: number) => void,
+  onSource?: (source: "cache" | "network") => void,
+) {
   if (!sessions) {
     sessions = (async () => {
       const encoderBytes = 28_157_093;
@@ -44,14 +47,22 @@ export function loadModel(onProgress?: (fraction: number) => void) {
       const report = () => onProgress?.(Math.min(1, (encLoaded + decLoaded) / totalBytes));
 
       const [encData, decData] = await Promise.all([
-        fetchCached(ENCODER_URL, (l) => {
-          encLoaded = l;
-          report();
-        }),
-        fetchCached(DECODER_URL, (l) => {
-          decLoaded = l;
-          report();
-        }),
+        fetchCached(
+          ENCODER_URL,
+          (l) => {
+            encLoaded = l;
+            report();
+          },
+          onSource,
+        ),
+        fetchCached(
+          DECODER_URL,
+          (l) => {
+            decLoaded = l;
+            report();
+          },
+          onSource,
+        ),
       ]);
 
       const opts: ort.InferenceSession.SessionOptions = {
@@ -145,6 +156,38 @@ function keepConnectedComponent(
         result[ni] = 1;
         queue.push(ni);
       }
+    }
+  }
+  return result;
+}
+
+/** True if (x, y) is inside the polygon (ray casting). */
+function pointInPolygon(x: number, y: number, poly: { x: number; y: number }[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i]!.x;
+    const yi = poly[i]!.y;
+    const xj = poly[j]!.x;
+    const yj = poly[j]!.y;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Zeroes out all mask pixels outside the polygon. */
+export function clipMaskToPolygon(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  polygon: { x: number; y: number }[],
+): Uint8Array {
+  const result = new Uint8Array(mask.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (mask[i] && pointInPolygon(x, y, polygon)) result[i] = 1;
     }
   }
   return result;
@@ -256,6 +299,36 @@ export function maskToCutout(
     height: ch,
     coverage: count / (w * h),
   };
+}
+
+/** Crops the canvas to its non-transparent bounding box (keeps existing alpha). */
+export function canvasToCutout(source: HTMLCanvasElement): Cutout | null {
+  const w = source.width;
+  const h = source.height;
+  const data = source.getContext("2d")!.getImageData(0, 0, w, h).data;
+  let minX = w;
+  let minY = h;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3]! > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+  const cw = maxX - minX + 1;
+  const ch = maxY - minY + 1;
+  const src = source.getContext("2d")!.getImageData(minX, minY, cw, ch);
+  const canvas = document.createElement("canvas");
+  canvas.width = cw;
+  canvas.height = ch;
+  canvas.getContext("2d")!.putImageData(src, 0, 0);
+  return { dataUrl: canvas.toDataURL("image/png"), width: cw, height: ch, coverage: 1 };
 }
 
 /** Loads a user file into a canvas, downscaling very large images. */

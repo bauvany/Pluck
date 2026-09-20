@@ -1,4 +1,4 @@
-# Cutout Studio
+# Pluck
 
 Next.js (App Router) + React 19 + Tailwind CSS v4 + shadcn/ui project.
 

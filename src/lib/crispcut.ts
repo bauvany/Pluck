@@ -1,14 +1,14 @@
 /**
  * RMBG-1.4 — high-quality general-purpose background removal by BRIA AI.
- * ~44MB int8-quantized ONNX, 1024×1024 input, excellent on photos.
- * Loaded directly from HuggingFace CDN.
- * Client-side only.
+ * Full-precision fp32 ONNX (~176MB) for maximum edge quality — the int8
+ * quantized variant loses fine detail. 1024×1024 input.
+ * Loaded directly from HuggingFace CDN. Client-side only.
  */
 import * as ort from "onnxruntime-web";
 import { fetchCached } from "./model-cache";
 
 const MODEL_URL =
-  "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx";
+  "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx";
 
 // RMBG-1.4 preprocessing: 1024×1024, mean=[0.5,0.5,0.5], std=[1,1,1].
 const MODEL_SIZE = 1024;
@@ -19,10 +19,11 @@ let session: Promise<ort.InferenceSession> | null = null;
 
 export function loadCrispcut(
   onProgress?: (loaded: number, total: number) => void,
+  onSource?: (source: "cache" | "network") => void,
 ): Promise<ort.InferenceSession> {
   if (!session) {
     session = (async () => {
-      const buffer = await fetchCached(MODEL_URL, onProgress);
+      const buffer = await fetchCached(MODEL_URL, onProgress, onSource);
       const s = await ort.InferenceSession.create(buffer, {
         executionProviders: ["wasm"],
         graphOptimizationLevel: "all",
@@ -54,12 +55,13 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
   ctx.drawImage(source, 0, 0, MODEL_SIZE, MODEL_SIZE);
   const { data } = ctx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE);
 
-  // Normalise to NCHW float32 with mean/std and 1/255 rescale.
-  const input = new Float32Array(3 * MODEL_SIZE * MODEL_SIZE);
-  for (let i = 0, p = 0; i < data.length; i += 4) {
-    for (let c = 0; c < 3; c++) {
-      input[p++] = (data[i + c]! / 255 - MEAN[c]!) / STD[c]!;
-    }
+  // Normalise to NCHW float32 (channel-PLANES, not interleaved) with mean/std.
+  const plane = MODEL_SIZE * MODEL_SIZE;
+  const input = new Float32Array(3 * plane);
+  for (let i = 0, px = 0; i < data.length; i += 4, px++) {
+    input[px] = (data[i]! / 255 - MEAN[0]!) / STD[0]!;
+    input[plane + px] = (data[i + 1]! / 255 - MEAN[1]!) / STD[1]!;
+    input[2 * plane + px] = (data[i + 2]! / 255 - MEAN[2]!) / STD[2]!;
   }
 
   const inputName = sess.inputNames[0]!;
@@ -67,9 +69,20 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
     [inputName]: new ort.Tensor("float32", input, [1, 3, MODEL_SIZE, MODEL_SIZE]),
   });
 
-  // Output is logits — apply sigmoid to get alpha matte in [0, 1].
+  // The ONNX graph already applies the final sigmoid — the output is an
+  // alpha matte. BRIA's reference post-processing min-max normalises it to
+  // stretch contrast (applying sigmoid again would compress everything into
+  // mid-range alpha and make the whole image semi-transparent).
   const outputName = sess.outputNames[0]!;
-  const logits = output[outputName]!.data as Float32Array;
+  const raw = output[outputName]!.data as Float32Array;
+  let ma = -Infinity;
+  let mi = Infinity;
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i]!;
+    if (v > ma) ma = v;
+    if (v < mi) mi = v;
+  }
+  const range = ma - mi || 1;
 
   // Build a MODEL_SIZE alpha mask (grayscale, soft edges preserved).
   const maskCanvas = document.createElement("canvas");
@@ -78,7 +91,7 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
   const maskCtx = maskCanvas.getContext("2d")!;
   const maskData = maskCtx.createImageData(MODEL_SIZE, MODEL_SIZE);
   for (let i = 0; i < MODEL_SIZE * MODEL_SIZE; i++) {
-    const alpha = 1 / (1 + Math.exp(-logits[i]!));
+    const alpha = (raw[i]! - mi) / range;
     const v = Math.round(alpha * 255);
     maskData.data[i * 4] = v;
     maskData.data[i * 4 + 1] = v;
