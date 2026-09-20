@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowClockwise,
-  ArrowUUpLeft,
-  ArrowUUpRight,
-  Download,
-  Eraser,
-  Eyedropper,
-  MagicWand,
-  Palette,
-  Plus,
-  Spinner,
-  Trash,
-  UploadSimple,
+  ArrowClockwiseIcon,
+  ArrowUUpLeftIcon,
+  ArrowUUpRightIcon,
+  DownloadIcon,
+  EraserIcon,
+  EyedropperIcon,
+  MagicWandIcon,
+  PaletteIcon,
+  PlusIcon,
+  SpinnerIcon,
+  TrashIcon,
+  UploadSimpleIcon,
 } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -821,11 +821,11 @@ export default function CutoutEditor() {
       {/* Full-screen loading overlay — blurs the entire screen while models load. */}
       {!modelsLoaded && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-5 bg-background/80 backdrop-blur-xl">
-          <div className="flex flex-col items-center gap-5">
-            <Spinner className="size-10 animate-spin text-accent" />
+          <div className="flex flex-col items-center gap-1">
+            <SpinnerIcon className="size-10 animate-spin text-accent [animation-duration:1.5s]" />
             <div className="text-center">
               <h2 className="font-display text-xl text-foreground">Loading up models…</h2>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p className="mt-1 text-sm text-muted-foreground w-[300px]">
                 Retrieving models needed for image editing and background removal.
               </p>
             </div>
@@ -858,7 +858,7 @@ export default function CutoutEditor() {
         <section className="min-w-0 rounded-2xl border border-border bg-card p-3 shadow-elegant sm:p-4">
           {!hasImage ? (
             <label className="flex aspect-4/3 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-muted/40 text-center transition-colors hover:border-accent/60 hover:bg-muted/70">
-              <UploadSimple weight="fill" className="size-6 text-accent" />
+              <UploadSimpleIcon weight="fill" className="size-6 text-accent" />
               <span className="text-sm font-medium text-foreground">Upload an image</span>
               <span className="text-xs text-muted-foreground">PNG or JPG, up to any size</span>
               <input
@@ -897,18 +897,18 @@ export default function CutoutEditor() {
               {/* Uploading overlay — spinner + text while encoding runs. */}
               {!imageReady && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/80 text-center">
-                  <Spinner className="size-7 animate-spin text-accent" />
+                  <SpinnerIcon className="size-7 animate-spin text-accent" />
                   <span className="text-sm font-medium text-foreground">Uploading image…</span>
                 </div>
               )}
               {imageReady && busy && (
                 <div className="absolute inset-0 flex items-center justify-center bg-background/45 backdrop-blur-[2px]">
-                  <Spinner className="size-6 animate-spin text-accent" />
+                  <SpinnerIcon className="size-6 animate-spin text-accent" />
                 </div>
               )}
               {imageReady && removingBg && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/55 backdrop-blur-md">
-                  <Spinner className="size-7 animate-spin text-white" />
+                  <SpinnerIcon className="size-7 animate-spin text-white" />
                   <span className="text-sm font-medium text-white">Removing background…</span>
                 </div>
               )}
@@ -933,7 +933,7 @@ export default function CutoutEditor() {
             <div className="flex w-max items-center gap-2">
               <div className="flex items-center gap-2">
               <Button variant="hero" size="sm" onClick={addPart} className="rounded-full shadow-xl">
-                <Plus className="size-4" /> Add as part
+                <PlusIcon className="size-4" /> Add as part
               </Button>
               <div className="flex items-center gap-1">
                 <Button
@@ -944,7 +944,7 @@ export default function CutoutEditor() {
                   className={`h-8 w-8 rounded-full shadow-xl ${canUndo ? "" : "opacity-30"}`}
                   title="Undo"
                 >
-                  <ArrowUUpLeft className="size-4" />
+                  <ArrowUUpLeftIcon className="size-4" />
                 </Button>
                 <Button
                   variant="outline"
@@ -954,7 +954,7 @@ export default function CutoutEditor() {
                   className={`h-8 w-8 rounded-full shadow-xl ${canRedo ? "" : "opacity-30"}`}
                   title="Redo"
                 >
-                  <ArrowUUpRight className="size-4" />
+                  <ArrowUUpRightIcon className="size-4" />
                 </Button>
               </div>
               <Button
@@ -964,7 +964,7 @@ export default function CutoutEditor() {
                 disabled={!hasImage || !ready || busy || removingBg || !imageReady}
                 className="rounded-full shadow-xl"
               >
-                <Eraser className="size-4" /> Remove background
+                <EraserIcon className="size-4" /> Remove background
               </Button>
               <Button
                 variant="outline"
@@ -974,7 +974,7 @@ export default function CutoutEditor() {
                 className="rounded-full shadow-xl"
                 title="Restore the original image and clear all edits"
               >
-                <ArrowClockwise className="size-4" /> Reset
+                <ArrowClockwiseIcon className="size-4" /> Reset
               </Button>
               <Tabs
                 value={mode}
@@ -1029,7 +1029,7 @@ export default function CutoutEditor() {
                   onClick={() => fileInputRef.current?.click()}
                   className="rounded-full shadow-xl"
                 >
-                  <UploadSimple className="size-4" /> Change image
+                  <UploadSimpleIcon className="size-4" /> Change image
                 </Button>
               )}
               </div>
@@ -1041,7 +1041,7 @@ export default function CutoutEditor() {
                 className={`rounded-full shadow-xl ${tool === "chroma" ? "bg-accent! text-black!" : ""}`}
                 title="Chroma key — click a color to cut it out"
               >
-                <Eyedropper className="size-4" /> Chroma key
+                <EyedropperIcon className="size-4" /> Chroma key
               </Button>
               <Button
                 variant="outline"
@@ -1050,7 +1050,7 @@ export default function CutoutEditor() {
                 disabled={!hasImage || !ready || busy || removingBg || !imageReady}
                 className={`rounded-full shadow-xl ${tool === "picker" ? "bg-accent! text-black!" : ""}`}
               >
-                <Palette className="size-4" /> Color picker
+                <PaletteIcon className="size-4" /> Color picker
               </Button>
               {pickedColor && (
                 <div className="flex h-8 items-center gap-2 rounded-full border-2 border-border bg-card px-3 shadow-xl">
@@ -1119,7 +1119,7 @@ export default function CutoutEditor() {
                 </div>
                 <div className="flex shrink-0 gap-1">
                   <Button size="icon" variant="outline" onClick={() => download(part)}>
-                    <Download className="size-4" />
+                    <DownloadIcon className="size-4" />
                   </Button>
                   <Button
                     size="icon"
@@ -1128,7 +1128,7 @@ export default function CutoutEditor() {
                       setParts((prev) => prev.filter((p) => p.id !== part.id));
                     }}
                   >
-                    <Trash className="size-4" />
+                    <TrashIcon className="size-4" />
                   </Button>
                 </div>
               </div>
@@ -1141,7 +1141,7 @@ export default function CutoutEditor() {
               className="mt-4 w-full"
               onClick={() => parts.forEach((p, i) => setTimeout(() => download(p), i * 250))}
             >
-              <Download className="size-4" /> Export all as PNG
+              <DownloadIcon className="size-4" /> Export all as PNG
             </Button>
           )}
         </section>

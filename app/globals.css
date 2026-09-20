@@ -139,7 +139,7 @@
    primary theme color. Change --theme-primary to retheme the whole app. */
 :root,
 .dark {
-  --theme-primary: #fffaaa;
+  --theme-primary: #fff100;
   --radius: 0.9rem;
   --background: oklch(0.14 0 0);
   --foreground: oklch(0.96 0 0);
