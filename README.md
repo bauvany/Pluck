@@ -1,6 +1,6 @@
 # Pluck
 
-Generate an image cut-out editor using MobileSAM. Upload any image, click on any part (hair, face, body parts, accessories, etc.) and have that part cut out. Export feature included to export those parts as transparent PNGs.
+Pluck is ann image cut-out editor using MobileSAM. Upload any image, click on any part (hair, face, body parts, accessories, etc.) and have that part cut out. Export feature included to export those parts as transparent PNGs.
 
 ## Stack
 

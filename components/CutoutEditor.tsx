@@ -157,7 +157,7 @@ export default function CutoutEditor() {
 
   useEffect(() => {
     let cancelled = false;
-    let sources: ("cache" | "network")[] = [];
+    const sources: ("cache" | "network")[] = [];
     const track = (s: "cache" | "network") => {
       sources.push(s);
       if (!cancelled) {
@@ -220,7 +220,9 @@ export default function CutoutEditor() {
 
   const updateHistoryFlags = useCallback(() => {
     setCanUndo(historyIndexRef.current > 0);
-    setCanRedo(historyIndexRef.current >= 0 && historyIndexRef.current < historyRef.current.length - 1);
+    setCanRedo(
+      historyIndexRef.current >= 0 && historyIndexRef.current < historyRef.current.length - 1,
+    );
   }, []);
 
   const snapshotCanvas = useCallback((): ImageData | null => {
@@ -253,7 +255,12 @@ export default function CutoutEditor() {
       try {
         let mask = await segment(encoded, pts);
         if (clipPolygon && clipPolygon.length >= 3) {
-          mask = clipMaskToPolygon(mask, baseCanvas.current!.width, baseCanvas.current!.height, clipPolygon);
+          mask = clipMaskToPolygon(
+            mask,
+            baseCanvas.current!.width,
+            baseCanvas.current!.height,
+            clipPolygon,
+          );
         }
         maskRef.current = mask;
         paintOverlay(mask, pts);
@@ -488,7 +495,10 @@ export default function CutoutEditor() {
         const dist = Math.hypot(x - last.x, y - last.y);
         const steps = Math.max(1, Math.ceil(dist / Math.max(1, brushSize / 4)));
         for (let s = 1; s <= steps; s++) {
-          applyManualStamp(last.x + ((x - last.x) * s) / steps, last.y + ((y - last.y) * s) / steps);
+          applyManualStamp(
+            last.x + ((x - last.x) * s) / steps,
+            last.y + ((y - last.y) * s) / steps,
+          );
         }
         lastStampRef.current = { x, y };
         return;
@@ -521,7 +531,15 @@ export default function CutoutEditor() {
           const sy = last.y + ((y - last.y) * s) / steps;
           stampBrush(stroke, base.width, base.height, sx, sy, r, 1);
           if (mode !== "cut" && maskRef.current) {
-            stampBrush(maskRef.current, base.width, base.height, sx, sy, r, mode === "exclude" ? 0 : 1);
+            stampBrush(
+              maskRef.current,
+              base.width,
+              base.height,
+              sx,
+              sy,
+              r,
+              mode === "exclude" ? 0 : 1,
+            );
           }
         }
         lastStampRef.current = { x, y };
@@ -669,9 +687,7 @@ export default function CutoutEditor() {
   const pickColor = (x: number, y: number) => {
     const base = baseCanvas.current;
     if (!base) return;
-    const d = base
-      .getContext("2d")!
-      .getImageData(Math.round(x), Math.round(y), 1, 1).data;
+    const d = base.getContext("2d")!.getImageData(Math.round(x), Math.round(y), 1, 1).data;
     setPickedColor(rgbToHex(d[0]!, d[1]!, d[2]!).toUpperCase());
   };
 
@@ -841,311 +857,312 @@ export default function CutoutEditor() {
             : "pointer-events-none blur-sm"
         }`}
       >
-      <header className="mb-8 flex flex-col gap-3">
-        <span className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium tracking-wide text-accent">
-          Pluck • v0.1.0
-        </span>
-        <h1 className="font-display text-3xl leading-tight text-foreground sm:text-5xl">
-          Click anything. Cut it out.
-        </h1>
-        <p className="max-w-xl text-sm text-muted-foreground sm:text-base">
-          Drop in a photo and tap hair, a face, a hand or an accessory. Each selection becomes a
-          transparent PNG you can export.
-        </p>
-      </header>
+        <header className="mb-8 flex flex-col gap-3">
+          <span className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium tracking-wide text-accent">
+            Pluck • v0.1.0
+          </span>
+          <h1 className="font-display text-3xl leading-tight text-foreground sm:text-5xl">
+            Click anything. Cut it out.
+          </h1>
+          <p className="max-w-xl text-sm text-muted-foreground sm:text-base">
+            Drop in a photo and tap hair, a face, a hand or an accessory. Each selection becomes a
+            transparent PNG you can export.
+          </p>
+        </header>
 
-      <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-        <section className="min-w-0 rounded-2xl border border-border bg-card p-3 shadow-elegant sm:p-4">
-          {!hasImage ? (
-            <label className="flex aspect-4/3 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-muted/40 text-center transition-colors hover:border-accent/60 hover:bg-muted/70">
-              <UploadSimpleIcon weight="fill" className="size-6 text-accent" />
-              <span className="text-sm font-medium text-foreground">Upload an image</span>
-              <span className="text-xs text-muted-foreground">PNG or JPG, up to any size</span>
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void handleFile(file);
-                }}
-              />
-            </label>
-          ) : (
-            <div className="relative mx-auto max-w-2xl overflow-hidden rounded-xl bg-checker">
-              {/* Canvas is always mounted — blurred until the image is ready. */}
-              <div
-                className={`transition-all duration-500 ${
-                  imageReady
-                    ? "animate-in fade-in slide-in-from-bottom-4 duration-500 blur-0"
-                    : "blur-md"
-                }`}
-              >
-                <canvas ref={displayRef} className="block w-full" />
-                <canvas
-                  ref={overlayRef}
-                  onClick={handleClick}
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  onPointerLeave={() => {
-                    if (isDrawingRef.current) handlePointerUp();
+        <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
+          <section className="min-w-0 rounded-2xl border border-border bg-card p-3 shadow-elegant sm:p-4">
+            {!hasImage ? (
+              <label className="flex aspect-4/3 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-muted/40 text-center transition-colors hover:border-accent/60 hover:bg-muted/70">
+                <UploadSimpleIcon weight="fill" className="size-6 text-accent" />
+                <span className="text-sm font-medium text-foreground">Upload an image</span>
+                <span className="text-xs text-muted-foreground">PNG or JPG, up to any size</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleFile(file);
                   }}
-                  className="absolute inset-0 block w-full cursor-crosshair touch-none"
                 />
+              </label>
+            ) : (
+              <div className="relative mx-auto max-w-2xl overflow-hidden rounded-xl bg-checker">
+                {/* Canvas is always mounted — blurred until the image is ready. */}
+                <div
+                  className={`transition-all duration-500 ${
+                    imageReady
+                      ? "animate-in fade-in slide-in-from-bottom-4 duration-500 blur-0"
+                      : "blur-md"
+                  }`}
+                >
+                  <canvas ref={displayRef} className="block w-full" />
+                  <canvas
+                    ref={overlayRef}
+                    onClick={handleClick}
+                    onPointerDown={handlePointerDown}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerUp}
+                    onPointerLeave={() => {
+                      if (isDrawingRef.current) handlePointerUp();
+                    }}
+                    className="absolute inset-0 block w-full cursor-crosshair touch-none"
+                  />
+                </div>
+                {/* Uploading overlay — spinner + text while encoding runs. */}
+                {!imageReady && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/80 text-center">
+                    <SpinnerIcon className="size-7 animate-spin text-accent" />
+                    <span className="text-sm font-medium text-foreground">Uploading image…</span>
+                  </div>
+                )}
+                {imageReady && busy && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-background/45 backdrop-blur-[2px]">
+                    <SpinnerIcon className="size-6 animate-spin text-accent" />
+                  </div>
+                )}
+                {imageReady && removingBg && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/55 backdrop-blur-md">
+                    <SpinnerIcon className="size-7 animate-spin text-white" />
+                    <span className="text-sm font-medium text-white">Removing background…</span>
+                  </div>
+                )}
               </div>
-              {/* Uploading overlay — spinner + text while encoding runs. */}
-              {!imageReady && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/80 text-center">
-                  <SpinnerIcon className="size-7 animate-spin text-accent" />
-                  <span className="text-sm font-medium text-foreground">Uploading image…</span>
-                </div>
-              )}
-              {imageReady && busy && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/45 backdrop-blur-[2px]">
-                  <SpinnerIcon className="size-6 animate-spin text-accent" />
-                </div>
-              )}
-              {imageReady && removingBg && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/55 backdrop-blur-md">
-                  <SpinnerIcon className="size-7 animate-spin text-white" />
-                  <span className="text-sm font-medium text-white">Removing background…</span>
-                </div>
-              )}
-            </div>
-          )}
+            )}
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleFile(file);
-            }}
-          />
-          <div
-            className={`mx-auto mt-3 w-full max-w-2xl overflow-x-auto rounded-full border-2 border-border bg-card px-1 py-1 transition-opacity [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
-              removingBg || !imageReady ? "pointer-events-none opacity-40" : ""
-            }`}
-          >
-            <div className="flex w-max items-center gap-2">
-              <div className="flex items-center gap-2">
-              <Button variant="hero" size="sm" onClick={addPart} className="rounded-full shadow-xl">
-                <PlusIcon className="size-4" /> Add as part
-              </Button>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={undo}
-                  disabled={!canUndo || busy || removingBg || !imageReady}
-                  className={`h-8 w-8 rounded-full shadow-xl ${canUndo ? "" : "opacity-30"}`}
-                  title="Undo"
-                >
-                  <ArrowUUpLeftIcon className="size-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={redo}
-                  disabled={!canRedo || busy || removingBg || !imageReady}
-                  className={`h-8 w-8 rounded-full shadow-xl ${canRedo ? "" : "opacity-30"}`}
-                  title="Redo"
-                >
-                  <ArrowUUpRightIcon className="size-4" />
-                </Button>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={removeBackground}
-                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
-                className="rounded-full shadow-xl"
-              >
-                <EraserIcon className="size-4" /> Remove background
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={resetEdits}
-                disabled={!hasImage || busy || removingBg || !imageReady}
-                className="rounded-full shadow-xl"
-                title="Restore the original image and clear all edits"
-              >
-                <ArrowClockwiseIcon className="size-4" /> Reset
-              </Button>
-              <Tabs
-                value={mode}
-                onValueChange={(v) => setMode(v as "mask" | "exclude" | "cut")}
-                className="flex items-center"
-              >
-                <TabsList className="h-8 rounded-full">
-                  <TabsTrigger
-                    value="mask"
-                    className="rounded-full text-xs data-[state=active]:bg-[var(--theme-primary)] data-[state=active]:text-black"
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleFile(file);
+              }}
+            />
+            <div
+              className={`mx-auto mt-3 w-full max-w-2xl overflow-x-auto rounded-full border-2 border-border bg-card px-1 py-1 transition-opacity [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+                removingBg || !imageReady ? "pointer-events-none opacity-40" : ""
+              }`}
+            >
+              <div className="flex w-max items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="hero"
+                    size="sm"
+                    onClick={addPart}
+                    className="rounded-full shadow-xl"
                   >
-                    Mask
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="exclude"
-                    className="rounded-full text-xs data-[state=active]:bg-[#ff5f7e] data-[state=active]:text-white"
+                    <PlusIcon className="size-4" /> Add as part
+                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={undo}
+                      disabled={!canUndo || busy || removingBg || !imageReady}
+                      className={`h-8 w-8 rounded-full shadow-xl ${canUndo ? "" : "opacity-30"}`}
+                      title="Undo"
+                    >
+                      <ArrowUUpLeftIcon className="size-4" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={redo}
+                      disabled={!canRedo || busy || removingBg || !imageReady}
+                      className={`h-8 w-8 rounded-full shadow-xl ${canRedo ? "" : "opacity-30"}`}
+                      title="Redo"
+                    >
+                      <ArrowUUpRightIcon className="size-4" />
+                    </Button>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={removeBackground}
+                    disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                    className="rounded-full shadow-xl"
                   >
-                    Exclude
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="cut"
-                    className="rounded-full text-xs data-[state=active]:bg-[#5f9eff] data-[state=active]:text-white"
+                    <EraserIcon className="size-4" /> Remove background
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={resetEdits}
+                    disabled={!hasImage || busy || removingBg || !imageReady}
+                    className="rounded-full shadow-xl"
+                    title="Restore the original image and clear all edits"
                   >
-                    Cut
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
-              <Tabs
-                value={paintMode}
-                onValueChange={(v) => setPaintMode(v as "auto" | "manual")}
-                className="flex items-center"
-              >
-                <TabsList className="h-8 rounded-full">
-                  <TabsTrigger
-                    value="auto"
-                    className="rounded-full text-xs data-[state=active]:bg-[#22d3ee] data-[state=active]:text-black"
+                    <ArrowClockwiseIcon className="size-4" /> Reset
+                  </Button>
+                  <Tabs
+                    value={mode}
+                    onValueChange={(v) => setMode(v as "mask" | "exclude" | "cut")}
+                    className="flex items-center"
                   >
-                    Auto
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="manual"
-                    className="rounded-full text-xs data-[state=active]:bg-[#fb923c] data-[state=active]:text-black"
+                    <TabsList className="h-8 rounded-full">
+                      <TabsTrigger
+                        value="mask"
+                        className="rounded-full text-xs data-[state=active]:bg-[var(--theme-primary)] data-[state=active]:text-black"
+                      >
+                        Mask
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="exclude"
+                        className="rounded-full text-xs data-[state=active]:bg-[#ff5f7e] data-[state=active]:text-white"
+                      >
+                        Exclude
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="cut"
+                        className="rounded-full text-xs data-[state=active]:bg-[#5f9eff] data-[state=active]:text-white"
+                      >
+                        Cut
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                  <Tabs
+                    value={paintMode}
+                    onValueChange={(v) => setPaintMode(v as "auto" | "manual")}
+                    className="flex items-center"
                   >
-                    Manual
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
-              {hasImage && (
+                    <TabsList className="h-8 rounded-full">
+                      <TabsTrigger
+                        value="auto"
+                        className="rounded-full text-xs data-[state=active]:bg-[#22d3ee] data-[state=active]:text-black"
+                      >
+                        Auto
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="manual"
+                        className="rounded-full text-xs data-[state=active]:bg-[#fb923c] data-[state=active]:text-black"
+                      >
+                        Manual
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                  {hasImage && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="rounded-full shadow-xl"
+                    >
+                      <UploadSimpleIcon className="size-4" /> Change image
+                    </Button>
+                  )}
+                </div>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="rounded-full shadow-xl"
+                  onClick={() => setTool((t) => (t === "chroma" ? "none" : "chroma"))}
+                  disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                  className={`rounded-full shadow-xl ${tool === "chroma" ? "bg-accent! text-black!" : ""}`}
+                  title="Chroma key — click a color to cut it out"
                 >
-                  <UploadSimpleIcon className="size-4" /> Change image
+                  <EyedropperIcon className="size-4" /> Chroma key
                 </Button>
-              )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setTool((t) => (t === "picker" ? "none" : "picker"))}
+                  disabled={!hasImage || !ready || busy || removingBg || !imageReady}
+                  className={`rounded-full shadow-xl ${tool === "picker" ? "bg-accent! text-black!" : ""}`}
+                >
+                  <PaletteIcon className="size-4" /> Color picker
+                </Button>
+                {pickedColor && (
+                  <div className="flex h-8 items-center gap-2 rounded-full border-2 border-border bg-card px-3 shadow-xl">
+                    <span
+                      className="size-4 rounded-full border border-border"
+                      style={{ backgroundColor: pickedColor }}
+                    />
+                    <span className="font-mono text-xs text-foreground">{pickedColor}</span>
+                  </div>
+                )}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setTool((t) => (t === "chroma" ? "none" : "chroma"))}
-                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
-                className={`rounded-full shadow-xl ${tool === "chroma" ? "bg-accent! text-black!" : ""}`}
-                title="Chroma key — click a color to cut it out"
-              >
-                <EyedropperIcon className="size-4" /> Chroma key
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setTool((t) => (t === "picker" ? "none" : "picker"))}
-                disabled={!hasImage || !ready || busy || removingBg || !imageReady}
-                className={`rounded-full shadow-xl ${tool === "picker" ? "bg-accent! text-black!" : ""}`}
-              >
-                <PaletteIcon className="size-4" /> Color picker
-              </Button>
-              {pickedColor && (
-                <div className="flex h-8 items-center gap-2 rounded-full border-2 border-border bg-card px-3 shadow-xl">
-                  <span
-                    className="size-4 rounded-full border border-border"
-                    style={{ backgroundColor: pickedColor }}
-                  />
-                  <span className="font-mono text-xs text-foreground">{pickedColor}</span>
-                </div>
-              )}
             </div>
-          </div>
-          <div className="mx-auto mt-2 flex w-full max-w-2xl items-center gap-3 rounded-full border-2 border-border bg-card px-4 py-1.5 shadow-xl">
-            <span className="text-xs font-medium text-muted-foreground">Brush Size</span>
-            <Slider
-              value={[brushSize]}
-              onValueChange={(v) => setBrushSize(v[0] ?? 1)}
-              min={1}
-              max={50}
-              step={1}
-              className="flex-1"
-            />
-            <span className="w-10 text-right font-mono text-xs text-foreground">
-              {brushSize}px
-            </span>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {status} <span className="text-accent">Click</span> to select,{" "}
-            <span className="text-accent">drag</span> to draw, or use{" "}
-            <span className="text-accent">Exclude</span>/<span className="text-accent">Cut</span> to
-            refine or extract.
-          </p>
-        </section>
+            <div className="mx-auto mt-2 flex w-full max-w-2xl items-center gap-3 rounded-full border-2 border-border bg-card px-4 py-1.5 shadow-xl">
+              <span className="text-xs font-medium text-muted-foreground">Brush Size</span>
+              <Slider
+                value={[brushSize]}
+                onValueChange={(v) => setBrushSize(v[0] ?? 1)}
+                min={1}
+                max={50}
+                step={1}
+                className="flex-1"
+              />
+              <span className="w-10 text-right font-mono text-xs text-foreground">
+                {brushSize}px
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {status} <span className="text-accent">Click</span> to select,{" "}
+              <span className="text-accent">drag</span> to draw, or use{" "}
+              <span className="text-accent">Exclude</span>/<span className="text-accent">Cut</span>{" "}
+              to refine or extract.
+            </p>
+          </section>
 
-        <section className="min-w-0 rounded-2xl border border-border bg-card p-4">
-          <h2 className="font-display text-lg text-foreground">Cut-out parts</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {parts.length ? `${parts.length} saved` : "Nothing yet — click a part in the image."}
-          </p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-            {parts.map((part) => (
-              <div
-                key={part.id}
-                className="flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3"
+          <section className="min-w-0 rounded-2xl border border-border bg-card p-4">
+            <h2 className="font-display text-lg text-foreground">Cut-out parts</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {parts.length ? `${parts.length} saved` : "Nothing yet — click a part in the image."}
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              {parts.map((part) => (
+                <div
+                  key={part.id}
+                  className="flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3"
+                >
+                  <div className="size-16 shrink-0 overflow-hidden rounded-lg bg-checker">
+                    <img src={part.dataUrl} alt={part.name} className="size-full object-contain" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <input
+                      value={part.name}
+                      onChange={(e) =>
+                        setParts((prev) =>
+                          prev.map((p) => (p.id === part.id ? { ...p, name: e.target.value } : p)),
+                        )
+                      }
+                      className="w-full rounded-md border border-transparent bg-transparent text-sm font-medium text-foreground outline-none focus:border-border focus:px-1"
+                    />
+                    <span className="text-xs text-muted-foreground">
+                      {part.width} × {part.height} px
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button size="icon" variant="outline" onClick={() => download(part)}>
+                      <DownloadIcon className="size-4" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="outline"
+                      onClick={() => {
+                        setParts((prev) => prev.filter((p) => p.id !== part.id));
+                      }}
+                    >
+                      <TrashIcon className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {parts.length > 1 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-4 w-full"
+                onClick={() => parts.forEach((p, i) => setTimeout(() => download(p), i * 250))}
               >
-                <div className="size-16 shrink-0 overflow-hidden rounded-lg bg-checker">
-                  <img
-                    src={part.dataUrl}
-                    alt={part.name}
-                    className="size-full object-contain"
-                  />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <input
-                    value={part.name}
-                    onChange={(e) =>
-                      setParts((prev) =>
-                        prev.map((p) => (p.id === part.id ? { ...p, name: e.target.value } : p)),
-                      )
-                    }
-                    className="w-full rounded-md border border-transparent bg-transparent text-sm font-medium text-foreground outline-none focus:border-border focus:px-1"
-                  />
-                  <span className="text-xs text-muted-foreground">
-                    {part.width} × {part.height} px
-                  </span>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  <Button size="icon" variant="outline" onClick={() => download(part)}>
-                    <DownloadIcon className="size-4" />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    onClick={() => {
-                      setParts((prev) => prev.filter((p) => p.id !== part.id));
-                    }}
-                  >
-                    <TrashIcon className="size-4" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-          {parts.length > 1 && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-4 w-full"
-              onClick={() => parts.forEach((p, i) => setTimeout(() => download(p), i * 250))}
-            >
-              <DownloadIcon className="size-4" /> Export all as PNG
-            </Button>
-          )}
-        </section>
-      </div>
+                <DownloadIcon className="size-4" /> Export all as PNG
+              </Button>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );

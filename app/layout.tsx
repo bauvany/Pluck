@@ -4,11 +4,13 @@ import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "Pluck",
-  description: "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
+  description:
+    "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
   authors: [{ name: "Pluck" }],
   openGraph: {
     title: "Pluck",
-    description: "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
+    description:
+      "Click any part of a photo and export it as a transparent PNG, all in your browser with MobileSAM.",
     type: "website",
   },
   twitter: {
@@ -24,11 +26,7 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>

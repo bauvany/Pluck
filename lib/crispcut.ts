@@ -7,8 +7,7 @@
 import * as ort from "onnxruntime-web";
 import { fetchCached } from "./model-cache";
 
-const MODEL_URL =
-  "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx";
+const MODEL_URL = "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx";
 
 // RMBG-1.4 preprocessing: 1024×1024, mean=[0.5,0.5,0.5], std=[1,1,1].
 const MODEL_SIZE = 1024;

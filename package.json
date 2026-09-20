@@ -1,6 +1,7 @@
 {
-  "name": "pluck",
+  "name": "Pluck",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "sideEffects": false,
   "type": "module",
   "scripts": {
@@ -8,6 +9,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run lint && bun run typecheck",
     "format": "prettier --write ."
   },
   "dependencies": {
