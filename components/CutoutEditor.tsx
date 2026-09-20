@@ -858,9 +858,6 @@ export default function CutoutEditor() {
         }`}
       >
         <header className="mb-8 flex flex-col gap-3">
-          <span className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium tracking-wide text-accent">
-            Pluck • v0.1.0
-          </span>
           <h1 className="font-display text-3xl leading-tight text-foreground sm:text-5xl">
             Click anything. Cut it out.
           </h1>
