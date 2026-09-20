@@ -8,7 +8,7 @@ Generate an image cut-out editor using MobileSAM. Upload any image, click on any
 - [Tailwind CSS v4](https://tailwindcss.com/) + [shadcn/ui](https://ui.shadcn.com/)
 - [onnxruntime-web](https://onnxruntime.ai/) running MobileSAM in the browser
 - [Bun](https://bun.sh/) as the package manager
-- ONNX models hosted on [Supabase Storage](https://supabase.com/)
+- ONNX models served from `public/models/`
 
 ## Development
 
@@ -17,7 +17,7 @@ bun install
 bun run dev
 ```
 
-Then open http://localhost:3000.
+Then open http://localhost:5000.
 
 ## Build
 
