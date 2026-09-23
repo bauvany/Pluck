@@ -130,12 +130,37 @@ function keepConnectedComponent(
   seedX: number,
   seedY: number,
 ): Uint8Array {
-  const result = new Uint8Array(mask.length);
   const sx = Math.round(seedX);
   const sy = Math.round(seedY);
-  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return result;
-  const seedIdx = sy * w + sx;
-  if (!mask[seedIdx]) return result;
+  const empty = () => new Uint8Array(mask.length);
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return empty();
+
+  let seedIdx = sy * w + sx;
+  if (!mask[seedIdx]) {
+    // The click landed outside the decoded mask — SAM's low-res decode shifts
+    // edges by a few px, so scan outward for the NEAREST masked pixel and use
+    // its component. If nothing is within ~48px, SAM genuinely selected
+    // nothing near the click — return empty rather than dumping an unrelated
+    // region (which used to flood the selection with the biggest blob).
+    seedIdx = -1;
+    outer: for (let r = 1; r <= 48; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = sx + dx;
+          const ny = sy + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const ni = ny * w + nx;
+          if (mask[ni]) {
+            seedIdx = ni;
+            break outer;
+          }
+        }
+      }
+    }
+    if (seedIdx < 0) return empty();
+  }
+
+  const result = new Uint8Array(mask.length);
   result[seedIdx] = 1;
   const queue = [seedIdx];
   while (queue.length > 0) {
@@ -222,13 +247,22 @@ export async function segment(image: EncodedImage, points: Point[]): Promise<Uin
   const logits = (await masks.getData()) as Float32Array;
   const pixels = image.width * image.height;
   const mask = new Uint8Array(pixels);
-  for (let i = 0; i < pixels; i++) mask[i] = logits[i]! > 0 ? 1 : 0;
+  let rawCount = 0;
+  for (let i = 0; i < pixels; i++) {
+    mask[i] = logits[i]! > 0 ? 1 : 0;
+    rawCount += mask[i]!;
+  }
 
   // Keep only the connected component containing the first positive point —
   // removes disconnected mask regions SAM may have selected elsewhere.
   const seed = points.find((p) => p.label === 1);
-  if (seed) return keepConnectedComponent(mask, image.width, image.height, seed.x, seed.y);
-  return mask;
+  const final = seed
+    ? keepConnectedComponent(mask, image.width, image.height, seed.x, seed.y)
+    : mask;
+  let keptCount = 0;
+  for (let i = 0; i < final.length; i++) keptCount += final[i]!;
+  console.log(`[mobilesam] raw=${rawCount} kept=${keptCount}`);
+  return final;
 }
 
 export type Cutout = {

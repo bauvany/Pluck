@@ -9,8 +9,9 @@ Next.js (App Router) + React 19 + Tailwind CSS v4 + shadcn/ui project.
 - **Styling**: Tailwind CSS v4 (via `@tailwindcss/postcss`)
 - **UI**: shadcn/ui (new-york style) + Radix UI primitives
 - **Models**: MobileSAM ONNX models served from `public/models/` (Apache-2.0,
-  license in `public/models/LICENSE`); RMBG-1.4 (BRIA AI, non-commercial license)
-  loaded from HuggingFace CDN on first use — do NOT self-host it
+  license in `public/models/LICENSE`); background removal via BiRefNet_lite-512
+  (MIT license, fp16 ~94MB on WebGPU / fp32 ~183MB on WASM fallback) loaded
+  from HuggingFace CDN.
 
 ## Commands
 

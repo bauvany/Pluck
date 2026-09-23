@@ -18,7 +18,6 @@ import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   canvasToCutout,
-  clipMaskToPolygon,
   encodeImage,
   fileToCanvas,
   loadModel,
@@ -28,7 +27,7 @@ import {
   type EncodedImage,
   type Point,
 } from "@/lib/mobilesam";
-import { removeBackground as crispcutRemoveBg, loadCrispcut } from "@/lib/crispcut";
+import { removeBackground as crispcutRemoveBg, getActiveBackend } from "@/lib/crispcut";
 import { idbGet, idbPut } from "@/lib/idb";
 
 type Part = Cutout & { id: string; name: string };
@@ -36,6 +35,7 @@ type Part = Cutout & { id: string; name: string };
 type Snapshot = {
   points: Point[];
   canvasData: ImageData | null;
+  mask: Uint8Array | null;
 };
 
 /** Paints a filled circle into a binary mask (manual brush stamp). */
@@ -83,6 +83,55 @@ function sampleStrokePoints(
     out.push({ x: pts[i]!.x + 0.5, y: pts[i]!.y + 0.5, label });
   }
   return out;
+}
+
+const rgbToHex = (r: number, g: number, b: number) =>
+  "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+
+/** Flood fill (paint bucket): contiguous pixels within `tol` of the seed
+ *  color, compared per-channel including alpha. Deterministic and
+ *  pixel-precise — unlike SAM, no guessing at object boundaries. */
+function floodFillMask(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+  tol: number,
+): Uint8Array {
+  const mask = new Uint8Array(w * h);
+  const si = (sy * w + sx) * 4;
+  const sr = data[si]!;
+  const sg = data[si + 1]!;
+  const sb = data[si + 2]!;
+  const sa = data[si + 3]!;
+  const stack = [sy * w + sx];
+  mask[sy * w + sx] = 1;
+  while (stack.length > 0) {
+    const idx = stack.pop()!;
+    const x = idx % w;
+    const y = Math.floor(idx / w);
+    const neighbors = [
+      x > 0 ? idx - 1 : -1,
+      x < w - 1 ? idx + 1 : -1,
+      y > 0 ? idx - w : -1,
+      y < h - 1 ? idx + w : -1,
+    ];
+    for (const ni of neighbors) {
+      if (ni < 0 || mask[ni]) continue;
+      const j = ni * 4;
+      if (
+        Math.abs(data[j]! - sr) <= tol &&
+        Math.abs(data[j + 1]! - sg) <= tol &&
+        Math.abs(data[j + 2]! - sb) <= tol &&
+        Math.abs(data[j + 3]! - sa) <= tol
+      ) {
+        mask[ni] = 1;
+        stack.push(ni);
+      }
+    }
+  }
+  return mask;
 }
 
 export default function CutoutEditor() {
@@ -141,19 +190,28 @@ export default function CutoutEditor() {
       if (blob) void idbPut("image", blob);
     }, "image/png");
   }, []);
-  const [mode, setMode] = useState<"mask" | "exclude" | "cut">("mask");
+  const [mode, setMode] = useState<"mask" | "exclude" | "cut" | "fill">("mask");
   const [paintMode, setPaintMode] = useState<"auto" | "manual">("auto");
   const [brushSize, setBrushSize] = useState(8);
+  const [fillTolerance, setFillTolerance] = useState(32);
   const [tool, setTool] = useState<"none" | "chroma" | "picker">("none");
   const [pickedColor, setPickedColor] = useState<string | null>(null);
+  // Picker magnifier: screen-space position of the floating preview relative
+  // to the canvas container, and whether the pointer is currently held down.
+  const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | null>(null);
+  const pickerDraggingRef = useRef(false);
+  const magnifierRef = useRef<HTMLCanvasElement | null>(null);
   const toolActive = tool !== "none";
   const manualPaintingRef = useRef(false);
   const lastStampRef = useRef<{ x: number; y: number } | null>(null);
   const strokeMaskRef = useRef<Uint8Array | null>(null);
-  const drawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const drawStartRef = useRef<{ x: number; y: number; sx: number; sy: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isDrawingRef = useRef(false);
   const dragOccurredRef = useRef(false);
+  // Clicks that arrive while segmentation is still running are queued here
+  // and replayed on completion — otherwise rapid clicks get silently dropped.
+  const pendingClickRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,6 +239,28 @@ export default function CutoutEditor() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Toggling the picker off dismisses the floating magnifier preview.
+  useEffect(() => {
+    if (tool !== "picker") setPickerPos(null);
+  }, [tool]);
+
+  // Merge a segment result into the accumulated selection — union for "add",
+  // subtraction for "subtract". Every gesture (click, stroke, fill) produces
+  // its own mask that combines with whatever is already highlighted.
+  const mergeMask = useCallback((seg: Uint8Array, op: "add" | "subtract"): Uint8Array => {
+    const prev = maskRef.current;
+    if (!prev || prev.length !== seg.length) {
+      return op === "subtract" ? new Uint8Array(seg.length) : seg;
+    }
+    const out = prev.slice();
+    if (op === "subtract") {
+      for (let i = 0; i < out.length; i++) if (seg[i]) out[i] = 0;
+    } else {
+      for (let i = 0; i < out.length; i++) if (seg[i]) out[i] = 1;
+    }
+    return out;
   }, []);
 
   const paintOverlay = useCallback((mask: Uint8Array | null, pts: Point[]) => {
@@ -243,7 +323,7 @@ export default function CutoutEditor() {
   );
 
   const runSegment = useCallback(
-    async (pts: Point[], clipPolygon?: { x: number; y: number }[]) => {
+    async (pts: Point[], op: "add" | "subtract" = "add") => {
       const encoded = encodedRef.current;
       if (!encoded || pts.length === 0) {
         maskRef.current = null;
@@ -253,25 +333,38 @@ export default function CutoutEditor() {
       setBusy(true);
       setStatus("Finding that part…");
       try {
-        let mask = await segment(encoded, pts);
-        if (clipPolygon && clipPolygon.length >= 3) {
-          mask = clipMaskToPolygon(
-            mask,
-            baseCanvas.current!.width,
-            baseCanvas.current!.height,
-            clipPolygon,
-          );
-        }
+        const seg = await segment(encoded, pts);
+        const segCount = seg.reduce((a, b) => a + b, 0);
+        console.log("[segment] mask px:", segCount);
+        // Accumulate: positive gestures union into the existing selection,
+        // excludes subtract the region SAM finds at that point — so clicking
+        // a new area keeps the previous highlight.
+        const mask = mergeMask(seg, op);
         maskRef.current = mask;
         paintOverlay(mask, pts);
-        setStatus("Looks right? Add it as a part, or click again to refine.");
+        pushHistory({ points: pts, canvasData: snapshotCanvas(), mask: mask.slice() });
+        setStatus(
+          op === "subtract"
+            ? "Removed that area. Click more to keep refining, or add it as a part."
+            : segCount === 0
+              ? "Nothing found at that spot — try clicking a different part."
+              : "Looks right? Click more areas to add them, or add it as a part.",
+        );
       } catch (err) {
         setStatus(`Selection failed: ${(err as Error).message}`);
       } finally {
         setBusy(false);
+        // Replay a click that arrived while we were still inferring.
+        const pending = pendingClickRef.current;
+        pendingClickRef.current = null;
+        if (pending) {
+          const pt: Point = { x: pending.x, y: pending.y, label: 1 };
+          setPoints((prev) => [...prev, pt]);
+          void runSegment([pt], "add");
+        }
       }
     },
-    [paintOverlay],
+    [paintOverlay, pushHistory, snapshotCanvas, mergeMask],
   );
 
   // Restore the last session's image + selection once models are ready.
@@ -312,7 +405,7 @@ export default function CutoutEditor() {
         setStatus("Analysing your last image…");
         encodedRef.current = await encodeImage(canvas);
         setImageReady(true);
-        historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
+        historyRef.current = [{ points: [], canvasData: snapshotCanvas(), mask: null }];
         historyIndexRef.current = 0;
         updateHistoryFlags();
         // Restore saved points (from hydrated state) and re-run segmentation.
@@ -359,7 +452,7 @@ export default function CutoutEditor() {
         setPoints([]);
         maskRef.current = null;
         paintOverlay(null, []);
-        pushHistory({ points: [], canvasData: snapshotCanvas() });
+        pushHistory({ points: [], canvasData: snapshotCanvas(), mask: null });
         setStatus("Cut out and saved. Click another part.");
         persistImage();
       } catch (err) {
@@ -385,23 +478,8 @@ export default function CutoutEditor() {
           dctx.drawImage(base, 0, 0);
         }
       }
-      maskRef.current = null;
-      if (snap.points.length > 0) {
-        // Re-run SAM in the background (no busy state) so clicks work immediately.
-        const encoded = encodedRef.current;
-        if (encoded) {
-          segment(encoded, snap.points)
-            .then((mask) => {
-              maskRef.current = mask;
-              paintOverlay(mask, snap.points);
-            })
-            .catch(() => paintOverlay(null, snap.points));
-        } else {
-          paintOverlay(null, snap.points);
-        }
-      } else {
-        paintOverlay(null, []);
-      }
+      maskRef.current = snap.mask ? snap.mask.slice() : null;
+      paintOverlay(maskRef.current, snap.points);
     },
     [paintOverlay],
   );
@@ -453,10 +531,74 @@ export default function CutoutEditor() {
     [brushSize, mode, paintOverlay],
   );
 
+  // Color picker: draws a zoomed magnifier region around the sampled pixel
+  // into the floating preview canvas.
+  const drawMagnifier = useCallback((sx: number, sy: number) => {
+    const base = baseCanvas.current;
+    const mag = magnifierRef.current;
+    if (!base || !mag) return;
+    const MAG = mag.width;
+    const ZOOM = 8;
+    const SAMPLE = Math.ceil(MAG / ZOOM); // 12px region
+    const ctx = mag.getContext("2d")!;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, MAG, MAG);
+    ctx.drawImage(
+      base,
+      sx - Math.floor(SAMPLE / 2),
+      sy - Math.floor(SAMPLE / 2),
+      SAMPLE,
+      SAMPLE,
+      0,
+      0,
+      MAG,
+      MAG,
+    );
+    // Outline the exact sampled pixel in the center.
+    const half = Math.floor(SAMPLE / 2) * ZOOM;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(half, half, ZOOM, ZOOM);
+  }, []);
+
+  const pickerSampleRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Samples the pixel at canvas coords, updates the hex label and magnifier.
+  // Called on pointer down/move while the picker drag is active.
+  const samplePicker = useCallback(
+    (cx: number, cy: number) => {
+      const base = baseCanvas.current;
+      if (!base) return;
+      const sx = Math.max(0, Math.min(base.width - 1, Math.round(cx)));
+      const sy = Math.max(0, Math.min(base.height - 1, Math.round(cy)));
+      const d = base.getContext("2d")!.getImageData(sx, sy, 1, 1).data;
+      setPickedColor(rgbToHex(d[0]!, d[1]!, d[2]!).toUpperCase());
+      pickerSampleRef.current = { x: sx, y: sy };
+      drawMagnifier(sx, sy);
+    },
+    [drawMagnifier],
+  );
+
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
+      // Picker: pressing starts a drag — show the magnifier and sample the
+      // color at the cursor. No stroke/trace is painted.
+      if (tool === "picker") {
+        if (!hasImage || !imageReady) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const sx = e.clientX - rect.left;
+        const sy = e.clientY - rect.top;
+        const cx = (sx / rect.width) * e.currentTarget.width;
+        const cy = (sy / rect.height) * e.currentTarget.height;
+        pickerDraggingRef.current = true;
+        setPickerPos({ x: sx, y: sy });
+        samplePicker(cx, cy);
+        return;
+      }
       if (toolActive) return;
       if (!hasImage || !ready || !imageReady || busy || removingBg) return;
+      // Fill (paint bucket) is click-only — no stroke/dot painting.
+      if (mode === "fill") return;
       const rect = e.currentTarget.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * e.currentTarget.width;
       const y = ((e.clientY - rect.top) / rect.height) * e.currentTarget.height;
@@ -476,11 +618,23 @@ export default function CutoutEditor() {
         applyManualStamp(x, y);
         return;
       }
-      drawStartRef.current = { x, y };
+      drawStartRef.current = { x, y, sx: e.clientX - rect.left, sy: e.clientY - rect.top };
       isDrawingRef.current = false;
       dragOccurredRef.current = false;
     },
-    [toolActive, paintMode, mode, applyManualStamp, hasImage, ready, imageReady, busy, removingBg],
+    [
+      tool,
+      toolActive,
+      paintMode,
+      mode,
+      applyManualStamp,
+      samplePicker,
+      hasImage,
+      ready,
+      imageReady,
+      busy,
+      removingBg,
+    ],
   );
 
   const handlePointerMove = useCallback(
@@ -488,6 +642,13 @@ export default function CutoutEditor() {
       const rect = e.currentTarget.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * e.currentTarget.width;
       const y = ((e.clientY - rect.top) / rect.height) * e.currentTarget.height;
+      // Picker: while dragging, the magnifier follows the cursor and samples
+      // continuously — no stroke is painted onto the canvas.
+      if (pickerDraggingRef.current) {
+        setPickerPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+        samplePicker(x, y);
+        return;
+      }
       if (manualPaintingRef.current) {
         // Interpolate stamps so fast drags don't leave gaps.
         const last = lastStampRef.current;
@@ -505,10 +666,13 @@ export default function CutoutEditor() {
       }
       const start = drawStartRef.current;
       if (!start) return;
-      const dx = x - start.x;
-      const dy = y - start.y;
-      if (!isDrawingRef.current && dx * dx + dy * dy > 25) {
-        // Moved more than ~5px — this is a drag, start painting the stroke.
+      // Drag detection in SCREEN pixels — a >5px physical movement means the
+      // user meant to draw. Measuring in canvas px made this threshold shrink
+      // to <1 screen px on large/downscaled images, so plain clicks with tiny
+      // mouse jitter were turned into useless speck strokes and never masked.
+      const dsx = e.clientX - rect.left - start.sx;
+      const dsy = e.clientY - rect.top - start.sy;
+      if (!isDrawingRef.current && dsx * dsx + dsy * dsy > 25) {
         isDrawingRef.current = true;
         dragOccurredRef.current = true;
         const base = baseCanvas.current;
@@ -546,18 +710,35 @@ export default function CutoutEditor() {
         paintOverlay(mode === "cut" ? stroke : maskRef.current, []);
       }
     },
-    [brushSize, mode, paintOverlay, applyManualStamp],
+    [brushSize, mode, paintOverlay, applyManualStamp, samplePicker],
   );
 
   const handlePointerUp = useCallback(() => {
+    // Picker: releasing just ends the drag — the magnifier and hex stay put
+    // until the tool is toggled off or another spot is clicked.
+    if (pickerDraggingRef.current) {
+      pickerDraggingRef.current = false;
+      return;
+    }
     if (manualPaintingRef.current) {
       manualPaintingRef.current = false;
       lastStampRef.current = null;
       if (mode === "cut") {
-        pushHistory({ points, canvasData: snapshotCanvas() });
+        pushHistory({
+          points,
+          canvasData: snapshotCanvas(),
+          mask: maskRef.current ? maskRef.current.slice() : null,
+        });
         persistImage();
         setStatus("Cut out. Keep scrubbing or switch tabs.");
       } else {
+        // Mask/exclude strokes mutate maskRef in place — snapshot a copy so
+        // manual painting is undoable too.
+        pushHistory({
+          points,
+          canvasData: null,
+          mask: maskRef.current ? maskRef.current.slice() : null,
+        });
         setStatus(
           mode === "mask"
             ? "Painted. Keep painting or add it as a part."
@@ -571,27 +752,31 @@ export default function CutoutEditor() {
       return;
     }
     isDrawingRef.current = false;
+    const start = drawStartRef.current;
     drawStartRef.current = null;
     // Sample prompt points from the painted stroke — the stroke area tells
-    // SAM what to segment.
+    // SAM what to segment. Prompts are always positive; the op decides
+    // whether the result unions into or subtracts from the selection.
     const stroke = strokeMaskRef.current;
     strokeMaskRef.current = null;
     lastStampRef.current = null;
     const base = baseCanvas.current;
     if (!stroke || !base) return;
-    const label: 0 | 1 = mode === "exclude" ? 0 : 1;
-    const sampled = sampleStrokePoints(stroke, base.width, base.height, label);
+    let sampled = sampleStrokePoints(stroke, base.width, base.height, 1);
     if (sampled.length === 0) {
-      setStatus("That stroke was too small — try a bigger brush or a longer stroke.");
-      return;
+      // Stroke too small to sample — treat it as a plain click at the press
+      // point rather than failing silently.
+      if (!start) {
+        setStatus("That stroke was too small — try a bigger brush or a longer stroke.");
+        return;
+      }
+      sampled = [{ x: start.x, y: start.y, label: 1 }];
     }
-    const next = [...points, ...sampled];
-    setPoints(next);
+    setPoints((prev) => [...prev, ...sampled]);
     if (mode === "cut") {
-      void runCut(next);
+      void runCut(sampled);
     } else {
-      pushHistory({ points: next, canvasData: snapshotCanvas() });
-      void runSegment(next);
+      void runSegment(sampled, mode === "exclude" ? "subtract" : "add");
     }
   }, [points, mode, pushHistory, snapshotCanvas, persistImage, runSegment, runCut]);
 
@@ -630,7 +815,7 @@ export default function CutoutEditor() {
         setImageReady(true);
         persistImage();
         // Push initial state so undo/redo has a baseline.
-        historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
+        historyRef.current = [{ points: [], canvasData: snapshotCanvas(), mask: null }];
         historyIndexRef.current = 0;
         updateHistoryFlags();
       } catch (err) {
@@ -644,9 +829,6 @@ export default function CutoutEditor() {
     },
     [paintOverlay, snapshotCanvas, updateHistoryFlags, persistImage],
   );
-
-  const rgbToHex = (r: number, g: number, b: number) =>
-    "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
 
   // Chroma key: removes every pixel matching the clicked color (small tolerance
   // so compression noise doesn't leave speckles).
@@ -679,36 +861,70 @@ export default function CutoutEditor() {
       dctx.clearRect(0, 0, display.width, display.height);
       dctx.drawImage(base, 0, 0);
     }
-    pushHistory({ points, canvasData: snapshotCanvas() });
+    pushHistory({
+      points,
+      canvasData: snapshotCanvas(),
+      mask: maskRef.current ? maskRef.current.slice() : null,
+    });
     persistImage();
     setStatus(`Cut out color ${rgbToHex(r, g, b).toUpperCase()}.`);
   };
 
-  const pickColor = (x: number, y: number) => {
-    const base = baseCanvas.current;
-    if (!base) return;
-    const d = base.getContext("2d")!.getImageData(Math.round(x), Math.round(y), 1, 1).data;
-    setPickedColor(rgbToHex(d[0]!, d[1]!, d[2]!).toUpperCase());
-  };
-
   const handleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (paintMode === "manual") return; // pointer handlers already painted
     if (dragOccurredRef.current) {
       // Was a drag (lasso), not a click — suppress.
       dragOccurredRef.current = false;
       return;
     }
-    if (!hasImage || !ready || !imageReady || busy || removingBg) return;
+    if (!hasImage || !ready || !imageReady || removingBg) return;
     const el = event.currentTarget;
     const rect = el.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * el.width;
     const y = ((event.clientY - rect.top) / rect.height) * el.height;
-    if (tool === "picker") {
-      pickColor(x, y);
+    console.log("[click]", {
+      x: Math.round(x),
+      y: Math.round(y),
+      tool,
+      mode,
+      paintMode,
+      busy,
+      removingBg,
+      encoded: !!encodedRef.current,
+      canvasW: el.width,
+      canvasH: el.height,
+    });
+    // Tools (chroma key, color picker) work in any mode — check them before
+    // the manual-mode guard so they're not dead in manual paint mode.
+    // Picker is handled entirely by the pointer handlers (down/move/up) so
+    // it can track drags for the magnifier preview — nothing to do on click.
+    if (tool === "picker") return;
+    if (tool === "chroma") {
+      if (busy) return;
+      applyChromaKey(x, y);
       return;
     }
-    if (tool === "chroma") {
-      applyChromaKey(x, y);
+    // Fill (paint bucket): deterministic flood fill — works in both paint
+    // modes and doesn't need the model, so it isn't gated on `busy`.
+    if (mode === "fill") {
+      const base = baseCanvas.current;
+      if (!base) return;
+      const px = Math.round(x);
+      const py = Math.round(y);
+      if (px < 0 || py < 0 || px >= base.width || py >= base.height) return;
+      const data = base.getContext("2d")!.getImageData(0, 0, base.width, base.height).data;
+      const seg = floodFillMask(data, base.width, base.height, px, py, fillTolerance);
+      const mask = mergeMask(seg, "add");
+      maskRef.current = mask;
+      paintOverlay(mask, []);
+      pushHistory({ points, canvasData: null, mask: mask.slice() });
+      setStatus("Filled. Click more regions to add them, or add it as a part.");
+      return;
+    }
+    if (paintMode === "manual") return; // pointer handlers already painted
+    if (busy) {
+      // Inference still running — queue mask-mode clicks so they're not
+      // silently swallowed; they replay when the current segment finishes.
+      if (mode === "mask") pendingClickRef.current = { x, y };
       return;
     }
     if (mode === "cut") {
@@ -721,22 +937,20 @@ export default function CutoutEditor() {
     if (mode === "exclude") {
       // Exclude only applies over already-masked areas — ignore clicks elsewhere.
       const mask = maskRef.current;
-      const px = Math.round(x);
-      const py = Math.round(y);
       if (!mask || !mask[Math.round(y) * baseCanvas.current!.width + Math.round(x)]) {
         setStatus("Nothing is highlighted there — switch to Mask to select a part first.");
         return;
       }
-      const next = [...points, { x, y, label: 0 as const }];
-      setPoints(next);
-      pushHistory({ points: next, canvasData: snapshotCanvas() });
-      void runSegment(next);
+      // Subtract whatever SAM segments at this point from the selection.
+      setPoints((prev) => [...prev, { x, y, label: 0 }]);
+      void runSegment([{ x, y, label: 1 }], "subtract");
       return;
     }
-    const next = [...points, { x, y, label: 1 as const }];
-    setPoints(next);
-    pushHistory({ points: next, canvasData: snapshotCanvas() });
-    void runSegment(next);
+    // Mask mode: every click segments that spot and unions it into the
+    // current selection — clicking a new area keeps the previous highlight.
+    const pt: Point = { x, y, label: 1 };
+    setPoints((prev) => [...prev, pt]);
+    void runSegment([pt], "add");
   };
 
   const addPart = () => {
@@ -782,7 +996,7 @@ export default function CutoutEditor() {
     setPoints([]);
     maskRef.current = null;
     paintOverlay(null, []);
-    historyRef.current = [{ points: [], canvasData: snapshotCanvas() }];
+    historyRef.current = [{ points: [], canvasData: snapshotCanvas(), mask: null }];
     historyIndexRef.current = 0;
     updateHistoryFlags();
     persistImage();
@@ -793,14 +1007,17 @@ export default function CutoutEditor() {
     const base = baseCanvas.current;
     if (!base || !ready) return;
     setRemovingBg(true);
-    setStatus("Preparing background remover (first run downloads ~176MB)…");
+    // BiRefNet_lite-512: fp16 on WebGPU (~94MB), fp32 on WASM (~183MB).
+    const backend = await getActiveBackend();
+    const sizeMsg = backend === "webgpu" ? "~94MB" : backend === "wasm" ? "~183MB" : "up to ~183MB";
+    setStatus(`Preparing background remover (first run downloads ${sizeMsg})…`);
     try {
       const mask = await crispcutRemoveBg(base);
       setStatus("Removing background…");
       const ctx = base.getContext("2d")!;
       const imageData = ctx.getImageData(0, 0, base.width, base.height);
       const data = imageData.data;
-      // RMBG-1.4 returns a soft foreground alpha (0-255) — multiply existing
+      // The model returns a soft foreground alpha (0-255) — multiply existing
       // alpha so earlier edits (cuts, chroma key) stay transparent.
       for (let i = 0; i < mask.length; i++) {
         data[i * 4 + 3] = Math.round((data[i * 4 + 3]! * mask[i]!) / 255);
@@ -815,7 +1032,7 @@ export default function CutoutEditor() {
       setPoints([]);
       maskRef.current = null;
       paintOverlay(null, []);
-      pushHistory({ points: [], canvasData: snapshotCanvas() });
+      pushHistory({ points: [], canvasData: snapshotCanvas(), mask: null });
       setStatus("Background removed. Click a part to cut it out, or change image.");
       persistImage();
     } catch (err) {
@@ -902,10 +1119,42 @@ export default function CutoutEditor() {
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
                     onPointerLeave={() => {
-                      if (isDrawingRef.current) handlePointerUp();
+                      if (isDrawingRef.current || pickerDraggingRef.current) handlePointerUp();
                     }}
                     className="absolute inset-0 block w-full cursor-crosshair touch-none"
                   />
+                  {/* Color picker magnifier — follows the cursor while
+                      dragging, then stays put on release until the tool is
+                      turned off or another spot is pressed. */}
+                  {tool === "picker" && pickerPos && (
+                    <div
+                      className="pointer-events-none absolute z-20 flex flex-col items-center gap-1.5"
+                      style={{
+                        left: pickerPos.x,
+                        top: pickerPos.y,
+                        transform:
+                          pickerPos.y < 140
+                            ? "translate(-50%, 20px)" // flip below when near the top
+                            : "translate(-50%, calc(-100% - 20px))",
+                      }}
+                    >
+                      <canvas
+                        ref={(el) => {
+                          magnifierRef.current = el;
+                          // First mount — the sample ran before React painted
+                          // this canvas, so draw the zoom here.
+                          const s = pickerSampleRef.current;
+                          if (el && s) drawMagnifier(s.x, s.y);
+                        }}
+                        width={96}
+                        height={96}
+                        className="size-24 rounded-full border-2 border-white shadow-xl ring-2 ring-black/40"
+                      />
+                      <span className="rounded-full bg-black/80 px-2.5 py-0.5 font-mono text-[11px] font-medium tracking-wide text-white shadow">
+                        {pickedColor}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 {/* Uploading overlay — spinner + text while encoding runs. */}
                 {!imageReady && (
@@ -975,6 +1224,16 @@ export default function CutoutEditor() {
                       <ArrowUUpRightIcon className="size-4" />
                     </Button>
                   </div>
+                  {hasImage && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="rounded-full shadow-xl"
+                    >
+                      <UploadSimpleIcon className="size-4" /> Change image
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -996,7 +1255,7 @@ export default function CutoutEditor() {
                   </Button>
                   <Tabs
                     value={mode}
-                    onValueChange={(v) => setMode(v as "mask" | "exclude" | "cut")}
+                    onValueChange={(v) => setMode(v as "mask" | "exclude" | "cut" | "fill")}
                     className="flex items-center"
                   >
                     <TabsList className="h-8 rounded-full">
@@ -1011,6 +1270,12 @@ export default function CutoutEditor() {
                         className="rounded-full text-xs data-[state=active]:bg-[#ff5f7e] data-[state=active]:text-white"
                       >
                         Exclude
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="fill"
+                        className="rounded-full text-xs data-[state=active]:bg-[#a78bfa] data-[state=active]:text-white"
+                      >
+                        Fill
                       </TabsTrigger>
                       <TabsTrigger
                         value="cut"
@@ -1040,16 +1305,6 @@ export default function CutoutEditor() {
                       </TabsTrigger>
                     </TabsList>
                   </Tabs>
-                  {hasImage && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="rounded-full shadow-xl"
-                    >
-                      <UploadSimpleIcon className="size-4" /> Change image
-                    </Button>
-                  )}
                 </div>
                 <Button
                   variant="outline"
@@ -1070,30 +1325,40 @@ export default function CutoutEditor() {
                 >
                   <PaletteIcon className="size-4" /> Color picker
                 </Button>
-                {pickedColor && (
-                  <div className="flex h-8 items-center gap-2 rounded-full border-2 border-border bg-card px-3 shadow-xl">
-                    <span
-                      className="size-4 rounded-full border border-border"
-                      style={{ backgroundColor: pickedColor }}
-                    />
-                    <span className="font-mono text-xs text-foreground">{pickedColor}</span>
-                  </div>
-                )}
               </div>
             </div>
             <div className="mx-auto mt-2 flex w-full max-w-2xl items-center gap-3 rounded-full border-2 border-border bg-card px-4 py-1.5 shadow-xl">
-              <span className="text-xs font-medium text-muted-foreground">Brush Size</span>
-              <Slider
-                value={[brushSize]}
-                onValueChange={(v) => setBrushSize(v[0] ?? 1)}
-                min={1}
-                max={50}
-                step={1}
-                className="flex-1"
-              />
-              <span className="w-10 text-right font-mono text-xs text-foreground">
-                {brushSize}px
-              </span>
+              {mode === "fill" ? (
+                <>
+                  <span className="text-xs font-medium text-muted-foreground">Tolerance</span>
+                  <Slider
+                    value={[fillTolerance]}
+                    onValueChange={(v) => setFillTolerance(v[0] ?? 32)}
+                    min={0}
+                    max={128}
+                    step={1}
+                    className="flex-1"
+                  />
+                  <span className="w-10 text-right font-mono text-xs text-foreground">
+                    {fillTolerance}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs font-medium text-muted-foreground">Brush Size</span>
+                  <Slider
+                    value={[brushSize]}
+                    onValueChange={(v) => setBrushSize(v[0] ?? 1)}
+                    min={1}
+                    max={100}
+                    step={1}
+                    className="flex-1"
+                  />
+                  <span className="w-10 text-right font-mono text-xs text-foreground">
+                    {brushSize}px
+                  </span>
+                </>
+              )}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               {status} <span className="text-accent">Click</span> to select,{" "}

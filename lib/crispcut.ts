@@ -1,52 +1,122 @@
 /**
- * RMBG-1.4 — high-quality general-purpose background removal by BRIA AI.
- * Full-precision fp32 ONNX (~176MB) for maximum edge quality — the int8
- * quantized variant loses fine detail. 1024×1024 input.
- * Loaded directly from HuggingFace CDN. Client-side only.
+ * Background removal via BiRefNet_lite-512 (ZhengPeng7/BiRefNet_lite,
+ * browser-ready 512×512 ONNX re-export by studioludens). Runs fully
+ * in-browser. MIT-licensed — no non-commercial restriction.
+ *
+ * Two execution paths, same model:
+ *
+ * - **WebGPU** (Chrome/Edge 113+, Safari 17+): fp16 weights (~94 MB). Fast
+ *   GPU inference.
+ * - **WASM fallback**: fp32 weights (~183 MB). Needed because several
+ *   fp16 operators lack WASM kernels. Slower but works everywhere.
+ *
+ * The 512×512 input (vs BiRefNet's native 1024) is what makes browser
+ * inference possible — the 1024 variants OOM the WASM heap and exceed
+ * WebGPU's storage-buffer limits. Edge detail is slightly softer than 1024
+ * but indistinguishable in practice.
+ *
+ * Output is raw logits — sigmoid must be applied externally to get the
+ * alpha matte in [0, 1].
  */
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/webgpu";
 import { fetchCached } from "./model-cache";
 
-const MODEL_URL = "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx";
+const MODEL_FP16_URL =
+  "https://huggingface.co/studioludens/birefnet-lite-512/resolve/main/onnx/model_fp16.onnx";
+const MODEL_FP32_URL =
+  "https://huggingface.co/studioludens/birefnet-lite-512/resolve/main/onnx/model.onnx";
 
-// RMBG-1.4 preprocessing: 1024×1024, mean=[0.5,0.5,0.5], std=[1,1,1].
-const MODEL_SIZE = 1024;
-const MEAN = [0.5, 0.5, 0.5];
-const STD = [1, 1, 1];
+// BiRefNet preprocessing: 512×512, ImageNet normalization, rescale 1/255.
+const MODEL_SIZE = 512;
+const MEAN = [0.485, 0.456, 0.406];
+const STD = [0.229, 0.224, 0.225];
 
-let session: Promise<ort.InferenceSession> | null = null;
+type Backend = "webgpu" | "wasm";
+type SessionInfo = { session: ort.InferenceSession; backend: Backend };
+
+let sessionInfo: Promise<SessionInfo> | null = null;
+
+/** True if the current browser can mount a WebGPU device. */
+async function hasWebGPU(): Promise<boolean> {
+  try {
+    const gpu = (navigator as unknown as { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
+    if (!gpu) return false;
+    const adapter = await gpu.requestAdapter();
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
 
 export function loadCrispcut(
   onProgress?: (loaded: number, total: number) => void,
   onSource?: (source: "cache" | "network") => void,
 ): Promise<ort.InferenceSession> {
-  if (!session) {
-    session = (async () => {
-      const buffer = await fetchCached(MODEL_URL, onProgress, onSource);
-      const s = await ort.InferenceSession.create(buffer, {
-        executionProviders: ["wasm"],
-        graphOptimizationLevel: "all",
-        logSeverityLevel: 3, // suppress warnings — only show errors
-      });
-      return s;
-    })().catch((err) => {
-      session = null;
-      throw err;
+  return getOrLoadSession(onProgress, onSource).then((info) => info.session);
+}
+
+async function getOrLoadSession(
+  onProgress?: (loaded: number, total: number) => void,
+  onSource?: (source: "cache" | "network") => void,
+): Promise<SessionInfo> {
+  if (sessionInfo) return sessionInfo;
+
+  const load = async (): Promise<SessionInfo> => {
+    // Prefer WebGPU + fp16 for speed and smaller download; fall back to
+    // WASM + fp32 (fp16 lacks some WASM kernels per onnxruntime-web).
+    const useWebGPU = await hasWebGPU();
+    if (useWebGPU) {
+      try {
+        const buffer = await fetchCached(MODEL_FP16_URL, onProgress, onSource);
+        const session = await ort.InferenceSession.create(buffer, {
+          executionProviders: ["webgpu"],
+          graphOptimizationLevel: "all",
+          logSeverityLevel: 3,
+        });
+        return { session, backend: "webgpu" as const };
+      } catch (err) {
+        console.warn("[crispcut] WebGPU session failed, falling back to WASM:", err);
+      }
+    }
+
+    const buffer = await fetchCached(MODEL_FP32_URL, onProgress, onSource);
+    const session = await ort.InferenceSession.create(buffer, {
+      executionProviders: ["wasm"],
+      graphOptimizationLevel: "all",
+      logSeverityLevel: 3,
     });
+    return { session, backend: "wasm" as const };
+  };
+
+  sessionInfo = load().catch((err) => {
+    sessionInfo = null;
+    throw err;
+  });
+  return sessionInfo;
+}
+
+/** Which backend the active session is using, so callers can report
+ *  the right download size to the user. */
+export async function getActiveBackend(): Promise<Backend | null> {
+  if (!sessionInfo) return null;
+  try {
+    const info = await sessionInfo;
+    return info.backend;
+  } catch {
+    return null;
   }
-  return session;
 }
 
 /**
- * Runs RMBG-1.4 on the given canvas and returns a soft alpha mask (0-255)
- * at the canvas's original resolution.
+ * Runs BiRefNet_lite on the given canvas and returns a soft alpha mask
+ * (0-255) at the canvas's original resolution.
  */
 export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8Array> {
-  const sess = await loadCrispcut();
+  const { session } = await getOrLoadSession();
   const w = source.width;
   const h = source.height;
 
-  // Model expects a plain resize to 1024×1024 (stretch, no letterbox).
+  // Resize to 512×512 (stretch, no letterbox).
   const canvas = document.createElement("canvas");
   canvas.width = MODEL_SIZE;
   canvas.height = MODEL_SIZE;
@@ -54,7 +124,7 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
   ctx.drawImage(source, 0, 0, MODEL_SIZE, MODEL_SIZE);
   const { data } = ctx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE);
 
-  // Normalise to NCHW float32 (channel-PLANES, not interleaved) with mean/std.
+  // Normalise to NCHW float32 with ImageNet mean/std (rescale 1/255 baked in).
   const plane = MODEL_SIZE * MODEL_SIZE;
   const input = new Float32Array(3 * plane);
   for (let i = 0, px = 0; i < data.length; i += 4, px++) {
@@ -63,25 +133,14 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
     input[2 * plane + px] = (data[i + 2]! / 255 - MEAN[2]!) / STD[2]!;
   }
 
-  const inputName = sess.inputNames[0]!;
-  const output = await sess.run({
-    [inputName]: new ort.Tensor("float32", input, [1, 3, MODEL_SIZE, MODEL_SIZE]),
+  const output = await session.run({
+    input_image: new ort.Tensor("float32", input, [1, 3, MODEL_SIZE, MODEL_SIZE]),
   });
 
-  // The ONNX graph already applies the final sigmoid — the output is an
-  // alpha matte. BRIA's reference post-processing min-max normalises it to
-  // stretch contrast (applying sigmoid again would compress everything into
-  // mid-range alpha and make the whole image semi-transparent).
-  const outputName = sess.outputNames[0]!;
+  // BiRefNet outputs raw logits — apply sigmoid to get the alpha matte.
+  // Output name varies by export; grab the first output tensor.
+  const outputName = session.outputNames[0]!;
   const raw = output[outputName]!.data as Float32Array;
-  let ma = -Infinity;
-  let mi = Infinity;
-  for (let i = 0; i < raw.length; i++) {
-    const v = raw[i]!;
-    if (v > ma) ma = v;
-    if (v < mi) mi = v;
-  }
-  const range = ma - mi || 1;
 
   // Build a MODEL_SIZE alpha mask (grayscale, soft edges preserved).
   const maskCanvas = document.createElement("canvas");
@@ -90,8 +149,9 @@ export async function removeBackground(source: HTMLCanvasElement): Promise<Uint8
   const maskCtx = maskCanvas.getContext("2d")!;
   const maskData = maskCtx.createImageData(MODEL_SIZE, MODEL_SIZE);
   for (let i = 0; i < MODEL_SIZE * MODEL_SIZE; i++) {
-    const alpha = (raw[i]! - mi) / range;
-    const v = Math.round(alpha * 255);
+    // sigmoid(x) = 1 / (1 + e^-x)
+    const sigmoid = 1 / (1 + Math.exp(-raw[i]!));
+    const v = Math.round(sigmoid * 255);
     maskData.data[i * 4] = v;
     maskData.data[i * 4 + 1] = v;
     maskData.data[i * 4 + 2] = v;

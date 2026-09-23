@@ -12,7 +12,7 @@ Pluck is a free, no-ads image cut-out editor. Upload any image, click on any par
 ## Models
 
 - [MobileSAM](https://github.com/ChaoningZhang/MobileSAM) — powers click-to-cut segmentation (encoder + decoder, ~45 MB, served from `public/models/`). Licensed under [Apache-2.0](public/models/LICENSE).
-- [RMBG-1.4](https://huggingface.co/briaai/RMBG-1.4) by BRIA AI — powers background removal (~176 MB, loaded from HuggingFace on first use). Licensed for [non-commercial use](https://huggingface.co/briaai/RMBG-1.4/blob/main/LICENSE) only.
+- [BiRefNet_lite-512](https://huggingface.co/studioludens/birefnet-lite-512) — powers background removal (fp16 ~94 MB on WebGPU, fp32 ~183 MB on WASM fallback, loaded from HuggingFace on first use). MIT-licensed.
 
 ## Development
 
